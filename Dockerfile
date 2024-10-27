@@ -6,13 +6,13 @@ RUN apt-get update && \
     apt-get install -y wget unzip curl gnupg gcc g++ make libpq-dev libffi-dev libssl-dev libxml2-dev libxslt1-dev zlib1g-dev libgl1-mesa-glx && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install a compatible Chrome version directly
-RUN wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && \
+# Install a specific compatible version of Chrome (version 114)
+RUN wget https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_114.0.5735.90-1_amd64.deb && \
     apt-get update && \
-    apt-get install -y ./google-chrome-stable_current_amd64.deb && \
-    rm ./google-chrome-stable_current_amd64.deb
+    apt-get install -y ./google-chrome-stable_114.0.5735.90-1_amd64.deb && \
+    rm ./google-chrome-stable_114.0.5735.90-1_amd64.deb
 
-# Install ChromeDriver to match the installed version of Chrome (adjust version if needed)
+# Install ChromeDriver version 114 to match Chrome version 114
 RUN wget -N https://chromedriver.storage.googleapis.com/114.0.5735.90/chromedriver_linux64.zip -P /tmp && \
     unzip /tmp/chromedriver_linux64.zip -d /usr/bin/ && \
     rm /tmp/chromedriver_linux64.zip
