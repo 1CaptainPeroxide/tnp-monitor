@@ -1,7 +1,7 @@
-# Use a lightweight Python image
+# Use the official Python image
 FROM python:3.9-slim
 
-# Install essential packages and tools
+# Install essential tools and dependencies
 RUN apt-get update && \
     apt-get install -y wget gnupg unzip && \
     wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - && \
@@ -10,13 +10,13 @@ RUN apt-get update && \
     apt-get install -y google-chrome-stable && \
     rm -rf /var/lib/apt/lists/*
 
-# Install ChromeDriver
+# Manually specify a compatible version of ChromeDriver
 RUN CHROMEDRIVER_VERSION=114.0.5735.90 && \
     wget -N https://chromedriver.storage.googleapis.com/$CHROMEDRIVER_VERSION/chromedriver_linux64.zip -P /tmp && \
     unzip /tmp/chromedriver_linux64.zip -d /usr/bin/ && \
     rm /tmp/chromedriver_linux64.zip
 
-# Set environment variable for display to allow headless mode
+# Set environment variable for display to enable headless mode
 ENV DISPLAY=:99
 
 # Set the working directory in the container
