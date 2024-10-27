@@ -12,11 +12,14 @@ RUN wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.d
     apt-get install -y ./google-chrome-stable_current_amd64.deb && \
     rm ./google-chrome-stable_current_amd64.deb
 
-# Dynamically fetch and install the compatible ChromeDriver version
+# Check installed Chrome version
+RUN google-chrome --version || echo "Google Chrome failed to install."
+
+# Dynamically fetch and install the compatible ChromeDriver version, with fallback
 RUN CHROME_VERSION=$(google-chrome --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+') && \
     echo "Detected Chrome version: $CHROME_VERSION" && \
-    CHROMEDRIVER_VERSION=$(curl -sS https://chromedriver.storage.googleapis.com/LATEST_RELEASE_$CHROME_VERSION) && \
-    echo "Matching ChromeDriver version: $CHROMEDRIVER_VERSION" && \
+    CHROMEDRIVER_VERSION=$(curl -sS https://chromedriver.storage.googleapis.com/LATEST_RELEASE_$CHROME_VERSION || echo "114.0.5735.90") && \
+    echo "Using ChromeDriver version: $CHROMEDRIVER_VERSION" && \
     wget -N https://chromedriver.storage.googleapis.com/$CHROMEDRIVER_VERSION/chromedriver_linux64.zip -P /tmp && \
     unzip /tmp/chromedriver_linux64.zip -d /usr/bin/ && \
     rm /tmp/chromedriver_linux64.zip
