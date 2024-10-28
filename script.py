@@ -5,6 +5,8 @@ from bs4 import BeautifulSoup
 from twilio.rest import Client
 from dotenv import load_dotenv
 import psycopg2
+from urllib.parse import urlparse
+
 
 # Load environment variables
 load_dotenv()
@@ -162,7 +164,7 @@ def extract_latest_job(content):
     # Extract the company name, deadline, and link to apply
     company_name = latest_row.find_all('td')[0].get_text(strip=True)
     deadline = latest_row.find_all('td')[1].get_text(strip=True)
-    apply_link_tag = latest_row.find('a', href=True, text="View & Apply")
+    apply_link_tag = latest_row.find_all('a')[1]  # Adjusted to find the second link in the row for "View & Apply"
     apply_link = f"https://tp.bitmesra.co.in/{apply_link_tag['href']}" if apply_link_tag else "No link available"
 
     # Construct the message
@@ -185,21 +187,36 @@ def send_whatsapp_message(message):
 
 def main():
     session = get_session()
+    conn = None  # Define conn at the start to ensure it's accessible in finally
     try:
+        # Log into the website
         login(session)
+
+        # Fetch the notices page
         notices_html = fetch_notices(session)
-        new_hash = compute_hash(notices_html)
+        new_notice_message = extract_latest_notice(notices_html)
 
-        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-        old_hash = get_last_hash(conn)
+        # Fetch the job listings page
+        jobs_html = session.get("https://tp.bitmesra.co.in/index").text  # Adjust URL as needed
+        new_job_message = extract_latest_job(jobs_html)
 
-        if new_hash != old_hash:
-            latest_notice = extract_latest_notice(notices_html)
-            message = f"📢 *New Update on TNP Website:*\n{latest_notice}"
-            send_whatsapp_message(message)
-            update_last_hash(conn, new_hash)
-        else:
-            print("No changes detected.")
+        # Initialize database connection for notice hash checking
+        if DATABASE_URL:
+            result = urlparse(DATABASE_URL)
+            conn = psycopg2.connect(
+                database=result.path[1:], user=result.username, password=result.password,
+                host=result.hostname, port=result.port, sslmode='require'
+            )
+
+            # Hash and store notices if new
+            notice_hash = compute_hash(new_notice_message)
+            if notice_hash != get_last_hash(conn):
+                send_whatsapp_message(f"📢 *New Notice on TNP Website:*\n{new_notice_message}")
+                update_last_hash(conn, notice_hash)
+
+        # Send a message for new job listings
+        if "No job listings found." not in new_job_message:
+            send_whatsapp_message(f"📢 *New Job Listing on TNP Website:*\n{new_job_message}")
 
     except Exception as e:
         error_message = f"❌ *Error in TNP Monitor:*\n{e}"
@@ -210,8 +227,10 @@ def main():
             print(f"Failed to send error notification: {send_error}")
 
     finally:
-        if 'conn' in locals():
+        if conn:
             conn.close()
+
+
 
 if __name__ == "__main__":
     main()
