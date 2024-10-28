@@ -17,7 +17,7 @@ RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add
     && rm -rf /var/lib/apt/lists/*
 
 # Install ChromeDriver
-RUN CHROME_VERSION=$(google-chrome --version | grep -oE '^[0-9]+') \
+RUN CHROME_VERSION=$(google-chrome --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1) \
     && echo "Detected Chrome version: $CHROME_VERSION" \
     && CHROMEDRIVER_VERSION=$(curl -sS https://chromedriver.storage.googleapis.com/LATEST_RELEASE_$CHROME_VERSION || echo "114.0.5735.90") \
     && echo "Using ChromeDriver version: $CHROMEDRIVER_VERSION" \
