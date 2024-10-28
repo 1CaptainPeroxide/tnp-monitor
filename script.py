@@ -55,12 +55,17 @@ def login(session):
         login_response = session.post(LOGIN_URL, data=login_data)
         login_response.raise_for_status()
 
-        # Debug: Print response to verify successful login
-        print("Login response text:", login_response.text[:500])  # Print first 500 characters for debugging
+        # Full response text to debug
+        print("Full login response text:", login_response.text)  # Print entire response for debugging
 
-        # Verify login by checking for logout or dashboard indicator
-        if "Logout" not in login_response.text:
-            raise Exception("Login failed. Please check your credentials or the login process.")
+        # Parse the login response to check for any error messages
+        soup = BeautifulSoup(login_response.text, 'html.parser')
+        error_message = soup.find(id="infoMessage")  # Check if an error message is displayed
+
+        # Check if the page still shows a login form or error message, indicating failure
+        if "Logout" not in login_response.text and (error_message or "login" in login_response.text.lower()):
+            error_text = error_message.get_text(strip=True) if error_message else "Unknown login error."
+            raise Exception(f"Login failed. Server message: {error_text}")
 
         print("Logged in successfully.")
         
