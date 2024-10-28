@@ -1,12 +1,10 @@
 import os
-import time
 import hashlib
 import requests
 from bs4 import BeautifulSoup
 from twilio.rest import Client
 from dotenv import load_dotenv
 import psycopg2
-from psycopg2 import sql
 
 # Load environment variables
 load_dotenv()
@@ -23,11 +21,10 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 # Initialize Twilio client
 client = Client(TWILIO_SID, TWILIO_AUTH_TOKEN)
 
-# URL Configuration
-LOGIN_URL = "https://tp.bitmesra.co.in/login"  # Replace with the actual login URL
-NOTICES_URL = "https://tp.bitmesra.co.in/notices"  # Replace with the actual notices URL
+# URLs for login and notices
+LOGIN_URL = "https://tp.bitmesra.co.in/auth/login.html"
+NOTICES_URL = "https://tp.bitmesra.co.in/notices"  # Replace with actual notices URL
 
-# Headers (Optional: Modify if needed)
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; TNPMonitor/1.0)"
 }
@@ -39,36 +36,34 @@ def get_session():
 
 def login(session):
     """
-    Logs into the TNP website using the provided credentials.
+    Logs into the TNP website and checks if login was successful.
     """
     try:
-        # Fetch the login page to get any necessary tokens (if required)
+        # Get the login page
         response = session.get(LOGIN_URL)
         response.raise_for_status()
-
-        # Parse the login page for CSRF tokens or other hidden fields (if any)
-        soup = BeautifulSoup(response.text, 'html.parser')
+        print("Fetched login page successfully.")
         
-        # Example: Extract CSRF token (Modify based on actual form)
-        csrf_token = soup.find('input', {'name': 'csrf_token'})['value'] if soup.find('input', {'name': 'csrf_token'}) else ''
-
         # Prepare login data
         login_data = {
-            'username': TP_USERNAME,
+            'identity': TP_USERNAME,
             'password': TP_PASSWORD,
-            'csrf_token': csrf_token  # Include if required
+            'submit': 'Login'
         }
 
-        # Submit the login form
+        # Attempt to login
         login_response = session.post(LOGIN_URL, data=login_data)
         login_response.raise_for_status()
 
-        # Verify login by checking the presence of a logout link or user dashboard
+        # Debug: Print response to verify successful login
+        print("Login response text:", login_response.text[:500])  # Print first 500 characters for debugging
+
+        # Verify login by checking for logout or dashboard indicator
         if "Logout" not in login_response.text:
             raise Exception("Login failed. Please check your credentials or the login process.")
 
         print("Logged in successfully.")
-
+        
     except Exception as e:
         raise Exception(f"An error occurred during login: {e}")
 
@@ -116,16 +111,12 @@ def update_last_hash(conn, new_hash):
 def extract_latest_notice(content):
     """
     Parses the HTML content and extracts the latest notice.
-    Modify the selectors based on the actual HTML structure of the notices page.
     """
     soup = BeautifulSoup(content, 'html.parser')
-    # Example: Assuming notices are within <div class="notice">
-    notices = soup.find_all('div', class_='notice')
+    notices = soup.find_all('div', class_='notice')  # Adjust selector based on actual structure
     if not notices:
         return "No notices found."
-
-    latest_notice = notices[0].get_text(strip=True)
-    return latest_notice
+    return notices[0].get_text(strip=True)
 
 def send_whatsapp_message(message):
     """
@@ -142,32 +133,19 @@ def send_whatsapp_message(message):
         raise Exception(f"Failed to send WhatsApp message: {e}")
 
 def main():
-    # Initialize session
     session = get_session()
-
     try:
-        # Log into the website
         login(session)
-
-        # Fetch the notices page
         notices_html = fetch_notices(session)
-
-        # Compute hash of the current content
         new_hash = compute_hash(notices_html)
 
-        # Connect to the PostgreSQL database
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-
-        # Retrieve the last stored hash
         old_hash = get_last_hash(conn)
 
         if new_hash != old_hash:
-            # Content has changed
             latest_notice = extract_latest_notice(notices_html)
             message = f"📢 *New Update on TNP Website:*\n{latest_notice}"
             send_whatsapp_message(message)
-
-            # Update the hash in the database
             update_last_hash(conn, new_hash)
         else:
             print("No changes detected.")
