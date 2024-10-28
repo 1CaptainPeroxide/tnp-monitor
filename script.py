@@ -23,7 +23,7 @@ client = Client(TWILIO_SID, TWILIO_AUTH_TOKEN)
 
 # URLs for login and notices
 LOGIN_URL = "https://tp.bitmesra.co.in/auth/login.html"
-NOTICES_URL = "https://tp.bitmesra.co.in/notices"  # Replace with actual notices URL
+NOTICES_URL = "https://tp.bitmesra.co.in/newsevents"  # Replace with actual notices URL
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; TNPMonitor/1.0)"
