@@ -200,7 +200,7 @@ def main():
         jobs_html = session.get("https://tp.bitmesra.co.in/index").text  # Adjust URL as needed
         new_job_message = extract_latest_job(jobs_html)
 
-        # Initialize database connection for notice hash checking
+        # Initialize database connection for hash checking
         if DATABASE_URL:
             result = urlparse(DATABASE_URL)
             conn = psycopg2.connect(
@@ -214,9 +214,14 @@ def main():
                 send_whatsapp_message(f"📢 *New Notice on TNP Website:*\n{new_notice_message}")
                 update_last_hash(conn, notice_hash)
 
-        # Send a message for new job listings
-        if "No job listings found." not in new_job_message:
-            send_whatsapp_message(f"📢 *New Job Listing on TNP Website:*\n{new_job_message}")
+            # Hash and store job listings if new
+            job_hash = compute_hash(new_job_message)
+            cur = conn.cursor()
+            cur.execute("SELECT hash FROM hashes WHERE hash = %s LIMIT 1;", (job_hash,))
+            if not cur.fetchone():
+                send_whatsapp_message(f"📢 *New Job Listing on TNP Website:*\n{new_job_message}")
+                update_last_hash(conn, job_hash)
+            cur.close()
 
     except Exception as e:
         error_message = f"❌ *Error in TNP Monitor:*\n{e}"
