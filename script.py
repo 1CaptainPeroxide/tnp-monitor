@@ -1,5 +1,6 @@
 import os
 import hashlib
+import time
 import requests
 from bs4 import BeautifulSoup
 from twilio.rest import Client
@@ -177,6 +178,7 @@ def extract_latest_job(content):
 def send_whatsapp_message(message):
     """
     Sends a WhatsApp message using Twilio to your number and a list of friends' numbers.
+    Adds a delay between messages to avoid rate limits.
     """
     try:
         # Send to your WhatsApp number
@@ -187,10 +189,11 @@ def send_whatsapp_message(message):
         )
         print("WhatsApp message sent to your number successfully.")
 
-        # Send to each friend's WhatsApp number
+        # Send to each friend's WhatsApp number with a delay to avoid rate limiting
         for friend_number in FRIENDS_WHATSAPP_NUMBERS:
             friend_number = friend_number.strip()  # Clean up any extra spaces
             if friend_number:  # Ensure it's not an empty string
+                time.sleep(1.1)  # 1.1 seconds delay to stay within Twilio's 1 rps limit
                 client.messages.create(
                     body=message,
                     from_=TWILIO_WHATSAPP_NUMBER,
