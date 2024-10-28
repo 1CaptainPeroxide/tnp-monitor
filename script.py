@@ -20,6 +20,9 @@ TWILIO_WHATSAPP_NUMBER = os.getenv('TWILIO_WHATSAPP_NUMBER')
 YOUR_WHATSAPP_NUMBER = os.getenv('YOUR_WHATSAPP_NUMBER')
 DATABASE_URL = os.getenv('DATABASE_URL')
 
+# Load Friends' WhatsApp numbers as a list
+FRIENDS_WHATSAPP_NUMBERS = os.getenv('FRIENDS_WHATSAPP_NUMBERS', '').split(',')
+
 # Initialize Twilio client
 client = Client(TWILIO_SID, TWILIO_AUTH_TOKEN)
 
@@ -173,15 +176,28 @@ def extract_latest_job(content):
 
 def send_whatsapp_message(message):
     """
-    Sends a WhatsApp message using Twilio.
+    Sends a WhatsApp message using Twilio to your number and a list of friends' numbers.
     """
     try:
+        # Send to your WhatsApp number
         client.messages.create(
             body=message,
             from_=TWILIO_WHATSAPP_NUMBER,
             to=YOUR_WHATSAPP_NUMBER
         )
-        print("WhatsApp message sent successfully.")
+        print("WhatsApp message sent to your number successfully.")
+
+        # Send to each friend's WhatsApp number
+        for friend_number in FRIENDS_WHATSAPP_NUMBERS:
+            friend_number = friend_number.strip()  # Clean up any extra spaces
+            if friend_number:  # Ensure it's not an empty string
+                client.messages.create(
+                    body=message,
+                    from_=TWILIO_WHATSAPP_NUMBER,
+                    to=friend_number
+                )
+                print(f"WhatsApp message sent to {friend_number} successfully.")
+
     except Exception as e:
         raise Exception(f"Failed to send WhatsApp message: {e}")
 
