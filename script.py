@@ -115,13 +115,33 @@ def update_last_hash(conn, new_hash):
 
 def extract_latest_notice(content):
     """
-    Parses the HTML content and extracts the latest notice.
+    Parses the HTML content and extracts the latest notice title and link.
     """
     soup = BeautifulSoup(content, 'html.parser')
-    notices = soup.find_all('div', class_='notice')  # Adjust selector based on actual structure
-    if not notices:
+    
+    # Find the table with id 'newsevents'
+    notices_table = soup.find('table', {'id': 'newsevents'})
+    if not notices_table:
+        return "No notices table found."
+
+    # Get the first row from the tbody, which represents the latest notice
+    latest_row = notices_table.find('tbody').find('tr')
+    if not latest_row:
         return "No notices found."
-    return notices[0].get_text(strip=True)
+
+    # Extract the notice title and URL
+    title_tag = latest_row.find('h6').find('a')
+    title = title_tag.get_text(strip=True)
+    link = title_tag['href']
+    full_link = f"https://tp.bitmesra.co.in/{link}"  # Construct full URL
+    
+    # Extract the post date
+    date_tag = latest_row.find_all('td')[1]
+    post_date = date_tag.get_text(strip=True)
+
+    # Construct the message
+    message = f"Title: {title}\nLink: {full_link}\nDate: {post_date}"
+    return message
 
 def send_whatsapp_message(message):
     """
