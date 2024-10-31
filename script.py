@@ -2,7 +2,6 @@ import os
 import hashlib
 import time
 import datetime
-import pytz
 import requests
 from bs4 import BeautifulSoup
 from twilio.rest import Client
@@ -104,21 +103,6 @@ def compute_hash(content):
     """
     return hashlib.md5(content.encode('utf-8')).hexdigest()
 
-def parse_date(post_date_str):
-    """
-    Tries to parse the date string using multiple formats.
-    """
-    date_formats = ['%d/%m/%Y %H:%M %Z', '%d/%m/%Y']
-    for fmt in date_formats:
-        try:
-            dt = datetime.datetime.strptime(post_date_str, fmt)
-            if '%Z' in fmt:
-                dt = dt.replace(tzinfo=pytz.timezone('Asia/Kolkata'))
-            return dt.date()
-        except ValueError:
-            continue
-    raise ValueError(f"time data '{post_date_str}' does not match any expected format")
-
 def get_last_hashes(conn):
     """
     Retrieves all stored hashes from the database.
@@ -159,11 +143,15 @@ def extract_today_notices(content):
 
     for row in notices_table.find('tbody').find_all('tr'):
         try:
-            # Extract the post date
-            date_tag = row.find_all('td')[1]
-            post_date_str = date_tag.get_text(strip=True)
-            # Parse the date
-            post_date = parse_date(post_date_str)
+            # Extract the date from the 'data-order' attribute
+            date_td = row.find_all('td')[1]
+            data_order = date_td.get('data-order')
+            if not data_order:
+                print("No 'data-order' attribute found for date.")
+                continue
+            # Parse the date from 'data-order'
+            post_datetime = datetime.datetime.strptime(data_order, '%Y/%m/%d %H:%M:%S')
+            post_date = post_datetime.date()
             if post_date != today:
                 continue  # Skip notices not from today
 
@@ -174,7 +162,7 @@ def extract_today_notices(content):
             full_link = f"https://tp.bitmesra.co.in/{link}"
 
             # Construct the message
-            message = f"Title: {title}\nLink: {full_link}\nDate: {post_date_str}"
+            message = f"Title: {title}\nLink: {full_link}\nDate: {post_datetime.strftime('%d/%m/%Y %H:%M')}"
             notice_hash = compute_hash(message)
             notices.append((message, notice_hash))
         except Exception as e:
@@ -196,11 +184,14 @@ def extract_today_jobs(content):
 
     for row in job_table.find('tbody').find_all('tr'):
         try:
-            # Extract the post date
-            date_tag = row.find_all('td')[1]
-            post_date_str = date_tag.get_text(strip=True)
-            # Parse the date
-            post_date = parse_date(post_date_str)
+            # Extract the date from the 'data-order' attribute
+            date_td = row.find_all('td')[1]
+            data_order = date_td.get('data-order')
+            if not data_order:
+                print("No 'data-order' attribute found for date.")
+                continue
+            # Parse the date from 'data-order'
+            post_date = datetime.datetime.strptime(data_order, '%Y/%m/%d').date()
             if post_date != today:
                 continue  # Skip job listings not from today
 
@@ -214,7 +205,7 @@ def extract_today_jobs(content):
                     break
 
             # Construct the message
-            message = f"New Job Listing:\nCompany: {company_name}\nDate: {post_date_str}\nApply here: {apply_link}"
+            message = f"New Job Listing:\nCompany: {company_name}\nDate: {post_date.strftime('%d/%m/%Y')}\nApply here: {apply_link}"
             job_hash = compute_hash(message)
             jobs.append((message, job_hash))
         except Exception as e:
