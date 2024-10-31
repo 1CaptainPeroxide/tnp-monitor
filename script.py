@@ -19,8 +19,6 @@ TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
 TWILIO_WHATSAPP_NUMBER = os.getenv('TWILIO_WHATSAPP_NUMBER')
 YOUR_WHATSAPP_NUMBER = os.getenv('YOUR_WHATSAPP_NUMBER')
 DATABASE_URL = os.getenv('DATABASE_URL')
-
-# Load Friends' WhatsApp numbers as a list
 FRIENDS_WHATSAPP_NUMBERS = os.getenv('FRIENDS_WHATSAPP_NUMBERS', '').split(',')
 
 # Initialize Twilio client
@@ -28,7 +26,7 @@ client = Client(TWILIO_SID, TWILIO_AUTH_TOKEN)
 
 # URLs for login and notices
 LOGIN_URL = "https://tp.bitmesra.co.in/auth/login.html"
-NOTICES_URL = "https://tp.bitmesra.co.in/newsevents"  # Replace with actual notices URL
+NOTICES_URL = "https://tp.bitmesra.co.in/newsevents"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; TNPMonitor/1.0)"
@@ -40,20 +38,44 @@ def get_session():
     return session
 
 def login(session):
-    # The login function remains the same
-    ...
+    try:
+        response = session.get(LOGIN_URL)
+        response.raise_for_status()
+        print("Fetched login page successfully.")
+        
+        login_data = {
+            'identity': TP_USERNAME,
+            'password': TP_PASSWORD,
+            'submit': 'Login'
+        }
+
+        login_response = session.post(LOGIN_URL, data=login_data)
+        login_response.raise_for_status()
+
+        soup = BeautifulSoup(login_response.text, 'html.parser')
+        error_message = soup.find(id="infoMessage")
+
+        if "Logout" not in login_response.text and (error_message or "login" in login_response.text.lower()):
+            error_text = error_message.get_text(strip=True) if error_message else "Unknown login error."
+            raise Exception(f"Login failed. Server message: {error_text}")
+
+        print("Logged in successfully.")
+        
+    except Exception as e:
+        raise Exception(f"An error occurred during login: {e}")
 
 def fetch_notices(session):
-    # Fetches the notices page and returns the HTML content.
-    ...
+    try:
+        response = session.get(NOTICES_URL)
+        response.raise_for_status()
+        return response.text
+    except Exception as e:
+        raise Exception(f"An error occurred while fetching notices: {e}")
 
 def compute_hash(content):
     return hashlib.md5(content.encode('utf-8')).hexdigest()
 
 def get_last_hashes(conn, item_type):
-    """
-    Retrieves the last stored hashes for notices or jobs from the database.
-    """
     with conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS hashes (
@@ -64,19 +86,15 @@ def get_last_hashes(conn, item_type):
             );
         """)
         cur.execute("SELECT hash FROM hashes WHERE item_type = %s;", (item_type,))
-        return {row[0] for row in cur.fetchall()}  # Return as a set for quick lookup
+        return {row[0] for row in cur.fetchall()}
 
 def update_hashes(conn, new_hashes, item_type):
-    """
-    Inserts new hashes into the database.
-    """
     with conn.cursor() as cur:
         for new_hash in new_hashes:
             cur.execute("INSERT INTO hashes (hash, item_type) VALUES (%s, %s);", (new_hash, item_type))
         conn.commit()
 
 def extract_notices(content):
-    # Extracts all notices on the page, returning them as a list of (title, link, post_date, hash) tuples.
     notices = []
     soup = BeautifulSoup(content, 'html.parser')
     notices_table = soup.find('table', {'id': 'newsevents'})
@@ -95,7 +113,6 @@ def extract_notices(content):
     return notices
 
 def extract_jobs(content):
-    # Extracts all job listings, returning as a list of (company_name, deadline, apply_link, hash) tuples.
     jobs = []
     soup = BeautifulSoup(content, 'html.parser')
     job_table = soup.find('table', {'id': 'job-listings'})
@@ -112,8 +129,27 @@ def extract_jobs(content):
     return jobs
 
 def send_whatsapp_message(message):
-    # Sends a WhatsApp message to you and your friends, with a delay to avoid rate limiting
-    ...
+    try:
+        client.messages.create(
+            body=message,
+            from_=TWILIO_WHATSAPP_NUMBER,
+            to=YOUR_WHATSAPP_NUMBER
+        )
+        print("WhatsApp message sent to your number successfully.")
+
+        for friend_number in FRIENDS_WHATSAPP_NUMBERS:
+            friend_number = friend_number.strip()
+            if friend_number:
+                time.sleep(1.1)
+                client.messages.create(
+                    body=message,
+                    from_=TWILIO_WHATSAPP_NUMBER,
+                    to=friend_number
+                )
+                print(f"WhatsApp message sent to {friend_number} successfully.")
+
+    except Exception as e:
+        raise Exception(f"Failed to send WhatsApp message: {e}")
 
 def main():
     session = get_session()
@@ -121,13 +157,11 @@ def main():
     try:
         login(session)
         
-        # Fetch notices and jobs
         notices_html = fetch_notices(session)
-        jobs_html = session.get("https://tp.bitmesra.co.in/index").text  # Adjust URL as needed
+        jobs_html = session.get("https://tp.bitmesra.co.in/index").text
         notices = extract_notices(notices_html)
         jobs = extract_jobs(jobs_html)
         
-        # Database connection
         if DATABASE_URL:
             result = urlparse(DATABASE_URL)
             conn = psycopg2.connect(
@@ -135,11 +169,9 @@ def main():
                 host=result.hostname, port=result.port, sslmode='require'
             )
 
-            # Retrieve stored hashes
             last_notice_hashes = get_last_hashes(conn, 'notice')
             last_job_hashes = get_last_hashes(conn, 'job')
 
-            # Check and send new notices
             new_notice_hashes = set()
             for message, notice_hash in notices:
                 if notice_hash not in last_notice_hashes:
@@ -147,7 +179,6 @@ def main():
                     new_notice_hashes.add(notice_hash)
             update_hashes(conn, new_notice_hashes, 'notice')
 
-            # Check and send new jobs
             new_job_hashes = set()
             for message, job_hash in jobs:
                 if job_hash not in last_job_hashes:
