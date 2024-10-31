@@ -1,13 +1,13 @@
 import os
 import hashlib
 import time
+import datetime  # Import datetime module
 import requests
 from bs4 import BeautifulSoup
 from twilio.rest import Client
 from dotenv import load_dotenv
 import psycopg2
 from urllib.parse import urlparse
-
 
 # Load environment variables
 load_dotenv()
@@ -29,7 +29,7 @@ client = Client(TWILIO_SID, TWILIO_AUTH_TOKEN)
 
 # URLs for login and notices
 LOGIN_URL = "https://tp.bitmesra.co.in/auth/login.html"
-NOTICES_URL = "https://tp.bitmesra.co.in/newsevents"  # Replace with actual notices URL
+NOTICES_URL = "https://tp.bitmesra.co.in/newsevents"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; TNPMonitor/1.0)"
@@ -49,7 +49,7 @@ def login(session):
         response = session.get(LOGIN_URL)
         response.raise_for_status()
         print("Fetched login page successfully.")
-        
+
         # Prepare login data
         login_data = {
             'identity': TP_USERNAME,
@@ -61,12 +61,9 @@ def login(session):
         login_response = session.post(LOGIN_URL, data=login_data)
         login_response.raise_for_status()
 
-        # Full response text to debug
-        print("Full login response text:", login_response.text)  # Print entire response for debugging
-
         # Parse the login response to check for any error messages
         soup = BeautifulSoup(login_response.text, 'html.parser')
-        error_message = soup.find(id="infoMessage")  # Check if an error message is displayed
+        error_message = soup.find(id="infoMessage")
 
         # Check if the page still shows a login form or error message, indicating failure
         if "Logout" not in login_response.text and (error_message or "login" in login_response.text.lower()):
@@ -74,7 +71,7 @@ def login(session):
             raise Exception(f"Login failed. Server message: {error_text}")
 
         print("Logged in successfully.")
-        
+
     except Exception as e:
         raise Exception(f"An error occurred during login: {e}")
 
@@ -95,9 +92,9 @@ def compute_hash(content):
     """
     return hashlib.md5(content.encode('utf-8')).hexdigest()
 
-def get_last_hash(conn):
+def get_last_hashes(conn):
     """
-    Retrieves the last stored hash from the database.
+    Retrieves all stored hashes from the database.
     """
     with conn.cursor() as cur:
         cur.execute("""
@@ -107,73 +104,95 @@ def get_last_hash(conn):
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
-        cur.execute("SELECT hash FROM hashes ORDER BY id DESC LIMIT 1;")
-        result = cur.fetchone()
-        return result[0] if result else ''
+        cur.execute("SELECT hash FROM hashes;")
+        results = cur.fetchall()
+        return set(row[0] for row in results) if results else set()
 
-def update_last_hash(conn, new_hash):
+def update_hashes(conn, new_hashes):
     """
-    Inserts the new hash into the database.
+    Inserts new hashes into the database.
     """
     with conn.cursor() as cur:
-        cur.execute("INSERT INTO hashes (hash) VALUES (%s);", (new_hash,))
+        for new_hash in new_hashes:
+            cur.execute("INSERT INTO hashes (hash) VALUES (%s);", (new_hash,))
         conn.commit()
 
-def extract_latest_notice(content):
+def extract_today_notices(content):
     """
-    Parses the HTML content and extracts the latest notice title and link.
+    Parses the HTML content and extracts all notices from the current day.
     """
+    notices = []
     soup = BeautifulSoup(content, 'html.parser')
-    
-    # Find the table with id 'newsevents'
     notices_table = soup.find('table', {'id': 'newsevents'})
     if not notices_table:
-        return "No notices table found."
+        print("No notices table found.")
+        return notices
 
-    # Get the first row from the tbody, which represents the latest notice
-    latest_row = notices_table.find('tbody').find('tr')
-    if not latest_row:
-        return "No notices found."
+    today = datetime.datetime.now().date()  # Today's date
 
-    # Extract the notice title and URL
-    title_tag = latest_row.find('h6').find('a')
-    title = title_tag.get_text(strip=True)
-    link = title_tag['href']
-    full_link = f"https://tp.bitmesra.co.in/{link}"  # Construct full URL
-    
-    # Extract the post date
-    date_tag = latest_row.find_all('td')[1]
-    post_date = date_tag.get_text(strip=True)
+    for row in notices_table.find('tbody').find_all('tr'):
+        try:
+            # Extract the post date
+            date_tag = row.find_all('td')[1]
+            post_date_str = date_tag.get_text(strip=True)
+            # Parse the date
+            post_date = datetime.datetime.strptime(post_date_str, '%d/%m/%Y %H:%M IST').date()
+            if post_date != today:
+                continue  # Skip notices not from today
 
-    # Construct the message
-    message = f"Title: {title}\nLink: {full_link}\nDate: {post_date}"
-    return message
+            # Extract the notice title and URL
+            title_tag = row.find('h6').find('a')
+            title = title_tag.get_text(strip=True)
+            link = title_tag['href']
+            full_link = f"https://tp.bitmesra.co.in/{link}"
 
-def extract_latest_job(content):
+            # Construct the message
+            message = f"Title: {title}\nLink: {full_link}\nDate: {post_date_str}"
+            notice_hash = compute_hash(message)
+            notices.append((message, notice_hash))
+        except Exception as e:
+            print(f"Failed to extract a notice: {e}")
+    return notices
+
+def extract_today_jobs(content):
     """
-    Parses the HTML content to extract the latest job listing details.
+    Parses the HTML content to extract all job listings from the current day.
     """
+    jobs = []
     soup = BeautifulSoup(content, 'html.parser')
-    
-    # Find the table with id 'job-listings'
     job_table = soup.find('table', {'id': 'job-listings'})
     if not job_table:
-        return "No job listings table found."
+        print("No job listings table found.")
+        return jobs
 
-    # Get the first row from tbody, which represents the latest job listing
-    latest_row = job_table.find('tbody').find('tr')
-    if not latest_row:
-        return "No job listings found."
+    today = datetime.datetime.now().date()  # Today's date
 
-    # Extract the company name, deadline, and link to apply
-    company_name = latest_row.find_all('td')[0].get_text(strip=True)
-    deadline = latest_row.find_all('td')[1].get_text(strip=True)
-    apply_link_tag = latest_row.find_all('a')[1]  # Adjusted to find the second link in the row for "View & Apply"
-    apply_link = f"https://tp.bitmesra.co.in/{apply_link_tag['href']}" if apply_link_tag else "No link available"
+    for row in job_table.find('tbody').find_all('tr'):
+        try:
+            # Extract the post date
+            date_tag = row.find_all('td')[1]
+            post_date_str = date_tag.get_text(strip=True)
+            # Parse the date
+            post_date = datetime.datetime.strptime(post_date_str, '%d/%m/%Y %H:%M IST').date()
+            if post_date != today:
+                continue  # Skip job listings not from today
 
-    # Construct the message
-    message = f"New Job Listing:\nCompany: {company_name}\nDeadline: {deadline}\nApply here: {apply_link}"
-    return message
+            # Extract the company name and link to apply
+            company_name = row.find_all('td')[0].get_text(strip=True)
+            apply_link_tag = row.find_all('a')
+            apply_link = "No link available"
+            for link_tag in apply_link_tag:
+                if "Apply" in link_tag.get_text():
+                    apply_link = f"https://tp.bitmesra.co.in/{link_tag['href']}"
+                    break
+
+            # Construct the message
+            message = f"New Job Listing:\nCompany: {company_name}\nDate: {post_date_str}\nApply here: {apply_link}"
+            job_hash = compute_hash(message)
+            jobs.append((message, job_hash))
+        except Exception as e:
+            print(f"Failed to extract a job listing: {e}")
+    return jobs
 
 def send_whatsapp_message(message):
     """
@@ -192,7 +211,7 @@ def send_whatsapp_message(message):
         # Send to each friend's WhatsApp number with a delay to avoid rate limiting
         for friend_number in FRIENDS_WHATSAPP_NUMBERS:
             friend_number = friend_number.strip()  # Clean up any extra spaces
-            if friend_number:  # Ensure it's not an empty string
+            if friend_number:
                 time.sleep(1.1)  # 1.1 seconds delay to stay within Twilio's 1 rps limit
                 client.messages.create(
                     body=message,
@@ -206,18 +225,18 @@ def send_whatsapp_message(message):
 
 def main():
     session = get_session()
-    conn = None  # Define conn at the start to ensure it's accessible in finally
+    conn = None
     try:
         # Log into the website
         login(session)
 
-        # Fetch the notices page
+        # Fetch the notices and jobs pages
         notices_html = fetch_notices(session)
-        new_notice_message = extract_latest_notice(notices_html)
-
-        # Fetch the job listings page
         jobs_html = session.get("https://tp.bitmesra.co.in/index").text  # Adjust URL as needed
-        new_job_message = extract_latest_job(jobs_html)
+
+        # Extract today's notices and jobs
+        today_notices = extract_today_notices(notices_html)
+        today_jobs = extract_today_jobs(jobs_html)
 
         # Initialize database connection for hash checking
         if DATABASE_URL:
@@ -227,20 +246,25 @@ def main():
                 host=result.hostname, port=result.port, sslmode='require'
             )
 
-            # Hash and store notices if new
-            notice_hash = compute_hash(new_notice_message)
-            if notice_hash != get_last_hash(conn):
-                send_whatsapp_message(f"📢 *New Notice on TNP Website:*\n{new_notice_message}")
-                update_last_hash(conn, notice_hash)
+            # Retrieve stored hashes
+            stored_hashes = get_last_hashes(conn)
 
-            # Hash and store job listings if new
-            job_hash = compute_hash(new_job_message)
-            cur = conn.cursor()
-            cur.execute("SELECT hash FROM hashes WHERE hash = %s LIMIT 1;", (job_hash,))
-            if not cur.fetchone():
-                send_whatsapp_message(f"📢 *New Job Listing on TNP Website:*\n{new_job_message}")
-                update_last_hash(conn, job_hash)
-            cur.close()
+            # Process today's notices
+            new_notice_hashes = set()
+            for message, notice_hash in today_notices:
+                if notice_hash not in stored_hashes:
+                    send_whatsapp_message(f"📢 *New Notice on TNP Website:*\n{message}")
+                    new_notice_hashes.add(notice_hash)
+
+            # Process today's jobs
+            new_job_hashes = set()
+            for message, job_hash in today_jobs:
+                if job_hash not in stored_hashes:
+                    send_whatsapp_message(f"📢 *New Job Listing on TNP Website:*\n{message}")
+                    new_job_hashes.add(job_hash)
+
+            # Update hashes in the database
+            update_hashes(conn, new_notice_hashes.union(new_job_hashes))
 
     except Exception as e:
         error_message = f"❌ *Error in TNP Monitor:*\n{e}"
@@ -253,8 +277,6 @@ def main():
     finally:
         if conn:
             conn.close()
-
-
 
 if __name__ == "__main__":
     main()
