@@ -99,14 +99,10 @@ def get_recent_hashes(conn, item_type, limit=5):
         results = cur.fetchall()
         return set(row[0] for row in results)
 
-def update_hashes(conn, new_hashes, item_type, limit=5):
+def initialize_hashes(conn, hashes, item_type):
     with conn.cursor() as cur:
-        for new_hash in new_hashes:
-            cur.execute("INSERT INTO hashes (hash, item_type) VALUES (%s, %s);", (new_hash, item_type))
-        cur.execute("""
-            DELETE FROM hashes WHERE item_type = %s 
-            AND id NOT IN (SELECT id FROM hashes WHERE item_type = %s ORDER BY timestamp DESC LIMIT %s);
-        """, (item_type, item_type, limit))
+        for hash_value in hashes:
+            cur.execute("INSERT INTO hashes (hash, item_type) VALUES (%s, %s);", (hash_value, item_type))
         conn.commit()
 
 def extract_all_notices(content):
@@ -181,7 +177,6 @@ def main():
     try:
         login(session)
 
-        # Fetch all notices and jobs
         notices_html = fetch_notices(session)
         jobs_html = fetch_jobs(session)
 
@@ -199,13 +194,20 @@ def main():
             recent_notice_hashes = get_recent_hashes(conn, 'notice')
             recent_job_hashes = get_recent_hashes(conn, 'job')
 
+            if not recent_notice_hashes and notices:
+                initialize_hashes(conn, [hash_value for _, hash_value in notices[:5]], 'notice')
+                print("Initialized recent notices in the database.")
+            if not recent_job_hashes and jobs:
+                initialize_hashes(conn, [hash_value for _, hash_value in jobs[:5]], 'job')
+                print("Initialized recent jobs in the database.")
+
             # Send new notices
             new_notice_hashes = set()
             for message, notice_hash in notices:
                 if notice_hash not in recent_notice_hashes:
                     send_whatsapp_message(f"📢 *New Notice on TNP Website:*\n{message}")
                     new_notice_hashes.add(notice_hash)
-            update_hashes(conn, new_notice_hashes, 'notice')
+            initialize_hashes(conn, new_notice_hashes, 'notice')
 
             # Send new job listings
             new_job_hashes = set()
@@ -213,7 +215,7 @@ def main():
                 if job_hash not in recent_job_hashes:
                     send_whatsapp_message(f"📢 *New Job Listing on TNP Website:*\n{message}")
                     new_job_hashes.add(job_hash)
-            update_hashes(conn, new_job_hashes, 'job')
+            initialize_hashes(conn, new_job_hashes, 'job')
 
     except Exception as e:
         error_message = f"❌ *Error in TNP Monitor:*\n{e}"
