@@ -1,7 +1,8 @@
 import os
 import hashlib
 import time
-import datetime  # Import datetime module
+import datetime
+import pytz
 import requests
 from bs4 import BeautifulSoup
 from twilio.rest import Client
@@ -103,6 +104,21 @@ def compute_hash(content):
     """
     return hashlib.md5(content.encode('utf-8')).hexdigest()
 
+def parse_date(post_date_str):
+    """
+    Tries to parse the date string using multiple formats.
+    """
+    date_formats = ['%d/%m/%Y %H:%M %Z', '%d/%m/%Y']
+    for fmt in date_formats:
+        try:
+            dt = datetime.datetime.strptime(post_date_str, fmt)
+            if '%Z' in fmt:
+                dt = dt.replace(tzinfo=pytz.timezone('Asia/Kolkata'))
+            return dt.date()
+        except ValueError:
+            continue
+    raise ValueError(f"time data '{post_date_str}' does not match any expected format")
+
 def get_last_hashes(conn):
     """
     Retrieves all stored hashes from the database.
@@ -147,7 +163,7 @@ def extract_today_notices(content):
             date_tag = row.find_all('td')[1]
             post_date_str = date_tag.get_text(strip=True)
             # Parse the date
-            post_date = datetime.datetime.strptime(post_date_str, '%d/%m/%Y').date()
+            post_date = parse_date(post_date_str)
             if post_date != today:
                 continue  # Skip notices not from today
 
@@ -184,7 +200,7 @@ def extract_today_jobs(content):
             date_tag = row.find_all('td')[1]
             post_date_str = date_tag.get_text(strip=True)
             # Parse the date
-            post_date = datetime.datetime.strptime(post_date_str, '%d/%m/%Y').date()
+            post_date = parse_date(post_date_str)
             if post_date != today:
                 continue  # Skip job listings not from today
 
