@@ -86,6 +86,17 @@ def fetch_notices(session):
     except Exception as e:
         raise Exception(f"An error occurred while fetching notices: {e}")
 
+def fetch_jobs(session):
+    """
+    Fetches the jobs page and returns the HTML content.
+    """
+    try:
+        response = session.get("https://tp.bitmesra.co.in/index")
+        response.raise_for_status()
+        return response.text
+    except Exception as e:
+        raise Exception(f"An error occurred while fetching job listings: {e}")
+
 def compute_hash(content):
     """
     Computes the MD5 hash of the given content.
@@ -136,7 +147,7 @@ def extract_today_notices(content):
             date_tag = row.find_all('td')[1]
             post_date_str = date_tag.get_text(strip=True)
             # Parse the date
-            post_date = datetime.datetime.strptime(post_date_str, '%d/%m/%Y %H:%M IST').date()
+            post_date = datetime.datetime.strptime(post_date_str, '%d/%m/%Y').date()
             if post_date != today:
                 continue  # Skip notices not from today
 
@@ -173,7 +184,7 @@ def extract_today_jobs(content):
             date_tag = row.find_all('td')[1]
             post_date_str = date_tag.get_text(strip=True)
             # Parse the date
-            post_date = datetime.datetime.strptime(post_date_str, '%d/%m/%Y %H:%M IST').date()
+            post_date = datetime.datetime.strptime(post_date_str, '%d/%m/%Y').date()
             if post_date != today:
                 continue  # Skip job listings not from today
 
@@ -232,7 +243,7 @@ def main():
 
         # Fetch the notices and jobs pages
         notices_html = fetch_notices(session)
-        jobs_html = session.get("https://tp.bitmesra.co.in/index").text  # Adjust URL as needed
+        jobs_html = fetch_jobs(session)
 
         # Extract today's notices and jobs
         today_notices = extract_today_notices(notices_html)
