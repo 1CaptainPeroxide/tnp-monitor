@@ -2,6 +2,8 @@ import os
 import hashlib
 import time
 import datetime
+from datetime import timedelta  # Import timedelta for time calculations
+import pytz  # Import pytz for timezone handling
 import requests
 from bs4 import BeautifulSoup
 from twilio.rest import Client
@@ -30,6 +32,7 @@ client = Client(TWILIO_SID, TWILIO_AUTH_TOKEN)
 # URLs for login and notices
 LOGIN_URL = "https://tp.bitmesra.co.in/auth/login.html"
 NOTICES_URL = "https://tp.bitmesra.co.in/newsevents"
+JOBS_URL = "https://tp.bitmesra.co.in/index"  # Ensure this is the correct URL for job listings
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; TNPMonitor/1.0)"
@@ -91,7 +94,7 @@ def fetch_jobs(session):
     Fetches the jobs page and returns the HTML content.
     """
     try:
-        response = session.get("https://tp.bitmesra.co.in/index")
+        response = session.get(JOBS_URL)
         response.raise_for_status()
         return response.text
     except Exception as e:
@@ -103,9 +106,9 @@ def compute_hash(content):
     """
     return hashlib.md5(content.encode('utf-8')).hexdigest()
 
-def get_last_hashes(conn):
+def get_recent_hashes(conn, cutoff):
     """
-    Retrieves all stored hashes from the database.
+    Retrieves all stored hashes from the database that are newer than the cutoff time.
     """
     with conn.cursor() as cur:
         cur.execute("""
@@ -115,7 +118,7 @@ def get_last_hashes(conn):
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
-        cur.execute("SELECT hash FROM hashes;")
+        cur.execute("SELECT hash FROM hashes WHERE timestamp >= %s;", (cutoff,))
         results = cur.fetchall()
         return set(row[0] for row in results) if results else set()
 
@@ -127,10 +130,20 @@ def update_hashes(conn, new_hashes):
         for new_hash in new_hashes:
             cur.execute("INSERT INTO hashes (hash) VALUES (%s);", (new_hash,))
         conn.commit()
+    print("Hashes updated successfully.")
 
-def extract_today_notices(content):
+def cleanup_hashes(conn, cutoff):
     """
-    Parses the HTML content and extracts all notices from the current day.
+    Deletes hashes older than the cutoff time (24 hours).
+    """
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM hashes WHERE timestamp < %s;", (cutoff,))
+        conn.commit()
+        print("Old hashes cleaned up successfully.")
+
+def extract_recent_notices(content, cutoff, ist):
+    """
+    Parses the HTML content and extracts all notices from the past 24 hours based on IST timezone.
     """
     notices = []
     soup = BeautifulSoup(content, 'html.parser')
@@ -138,8 +151,6 @@ def extract_today_notices(content):
     if not notices_table:
         print("No notices table found.")
         return notices
-
-    today = datetime.datetime.now().date()  # Today's date
 
     for row in notices_table.find('tbody').find_all('tr'):
         try:
@@ -149,11 +160,14 @@ def extract_today_notices(content):
             if not data_order:
                 print("No 'data-order' attribute found for date.")
                 continue
+
             # Parse the date from 'data-order'
             post_datetime = datetime.datetime.strptime(data_order, '%Y/%m/%d %H:%M:%S')
-            post_date = post_datetime.date()
-            if post_date != today:
-                continue  # Skip notices not from today
+            post_datetime = ist.localize(post_datetime)  # Assign IST timezone
+            post_time = post_datetime
+
+            if post_time < cutoff:
+                continue  # Skip notices older than cutoff
 
             # Extract the notice title and URL
             title_tag = row.find('h6').find('a')
@@ -169,9 +183,9 @@ def extract_today_notices(content):
             print(f"Failed to extract a notice: {e}")
     return notices
 
-def extract_today_jobs(content):
+def extract_recent_jobs(content, cutoff, ist):
     """
-    Parses the HTML content to extract all job listings from the current day.
+    Parses the HTML content to extract all job listings from the past 24 hours based on IST timezone.
     """
     jobs = []
     soup = BeautifulSoup(content, 'html.parser')
@@ -179,8 +193,6 @@ def extract_today_jobs(content):
     if not job_table:
         print("No job listings table found.")
         return jobs
-
-    today = datetime.datetime.now().date()  # Today's date
 
     for row in job_table.find('tbody').find_all('tr'):
         try:
@@ -190,10 +202,13 @@ def extract_today_jobs(content):
             if not data_order:
                 print("No 'data-order' attribute found for date.")
                 continue
+
             # Parse the date from 'data-order'
             post_date = datetime.datetime.strptime(data_order, '%Y/%m/%d').date()
-            if post_date != today:
-                continue  # Skip job listings not from today
+            post_datetime = ist.localize(datetime.datetime.combine(post_date, datetime.time.min))  # Start of day
+
+            if post_datetime < cutoff:
+                continue  # Skip job listings older than cutoff
 
             # Extract the company name and link to apply
             company_name = row.find_all('td')[0].get_text(strip=True)
@@ -245,6 +260,11 @@ def main():
     session = get_session()
     conn = None
     try:
+        # Define IST timezone
+        ist = pytz.timezone('Asia/Kolkata')
+        now = datetime.datetime.now(ist)
+        cutoff = now - timedelta(hours=24)
+
         # Log into the website
         login(session)
 
@@ -252,9 +272,9 @@ def main():
         notices_html = fetch_notices(session)
         jobs_html = fetch_jobs(session)
 
-        # Extract today's notices and jobs
-        today_notices = extract_today_notices(notices_html)
-        today_jobs = extract_today_jobs(jobs_html)
+        # Extract recent notices and jobs based on cutoff
+        recent_notices = extract_recent_notices(notices_html, cutoff, ist)
+        recent_jobs = extract_recent_jobs(jobs_html, cutoff, ist)
 
         # Initialize database connection for hash checking
         if DATABASE_URL:
@@ -264,25 +284,28 @@ def main():
                 host=result.hostname, port=result.port, sslmode='require'
             )
 
-            # Retrieve stored hashes
-            stored_hashes = get_last_hashes(conn)
+            # Retrieve stored hashes from the past 24 hours
+            stored_hashes = get_recent_hashes(conn, cutoff)
 
-            # Process today's notices
+            # Process recent notices
             new_notice_hashes = set()
-            for message, notice_hash in today_notices:
+            for message, notice_hash in recent_notices:
                 if notice_hash not in stored_hashes:
                     send_whatsapp_message(f"📢 *New Notice on TNP Website:*\n{message}")
                     new_notice_hashes.add(notice_hash)
 
-            # Process today's jobs
+            # Process recent jobs
             new_job_hashes = set()
-            for message, job_hash in today_jobs:
+            for message, job_hash in recent_jobs:
                 if job_hash not in stored_hashes:
                     send_whatsapp_message(f"📢 *New Job Listing on TNP Website:*\n{message}")
                     new_job_hashes.add(job_hash)
 
             # Update hashes in the database
             update_hashes(conn, new_notice_hashes.union(new_job_hashes))
+
+            # Cleanup old hashes
+            cleanup_hashes(conn, cutoff)
 
     except Exception as e:
         error_message = f"❌ *Error in TNP Monitor:*\n{e}"
