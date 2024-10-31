@@ -29,7 +29,7 @@ client = Client(TWILIO_SID, TWILIO_AUTH_TOKEN)
 # URLs for login and notices
 LOGIN_URL = "https://tp.bitmesra.co.in/auth/login.html"
 NOTICES_URL = "https://tp.bitmesra.co.in/newsevents"
-JOBS_URL = "https://tp.bitmesra.co.in/index"  # Replace with actual jobs URL
+JOBS_URL = "https://tp.bitmesra.co.in/index"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; TNPMonitor/1.0)"
@@ -85,7 +85,7 @@ def fetch_jobs(session):
 def compute_hash(content):
     return hashlib.md5(content.encode('utf-8')).hexdigest()
 
-def get_recent_hashes(conn, item_type, limit=5):
+def initialize_database(conn):
     with conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS hashes (
@@ -95,11 +95,31 @@ def get_recent_hashes(conn, item_type, limit=5):
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS setup_status (
+                id SERIAL PRIMARY KEY,
+                initialized BOOLEAN DEFAULT FALSE
+            );
+        """)
+        cur.execute("SELECT initialized FROM setup_status LIMIT 1;")
+        result = cur.fetchone()
+        if not result:
+            cur.execute("INSERT INTO setup_status (initialized) VALUES (FALSE);")
+            conn.commit()
+        return result[0] if result else False
+
+def set_initialization_complete(conn):
+    with conn.cursor() as cur:
+        cur.execute("UPDATE setup_status SET initialized = TRUE;")
+        conn.commit()
+
+def get_recent_hashes(conn, item_type, limit=5):
+    with conn.cursor() as cur:
         cur.execute("SELECT hash FROM hashes WHERE item_type = %s ORDER BY timestamp DESC LIMIT %s;", (item_type, limit))
         results = cur.fetchall()
         return set(row[0] for row in results)
 
-def initialize_hashes(conn, hashes, item_type):
+def store_hashes(conn, hashes, item_type):
     with conn.cursor() as cur:
         for hash_value in hashes:
             cur.execute("INSERT INTO hashes (hash, item_type) VALUES (%s, %s);", (hash_value, item_type))
@@ -190,32 +210,34 @@ def main():
                 host=result.hostname, port=result.port, sslmode='require'
             )
 
+            initialized = initialize_database(conn)
+
             # Retrieve recent hashes for notices and jobs
             recent_notice_hashes = get_recent_hashes(conn, 'notice')
             recent_job_hashes = get_recent_hashes(conn, 'job')
 
-            if not recent_notice_hashes and notices:
-                initialize_hashes(conn, [hash_value for _, hash_value in notices[:5]], 'notice')
-                print("Initialized recent notices in the database.")
-            if not recent_job_hashes and jobs:
-                initialize_hashes(conn, [hash_value for _, hash_value in jobs[:5]], 'job')
-                print("Initialized recent jobs in the database.")
+            if not initialized:
+                # Store initial set of hashes (limit to the latest 5 notices/jobs)
+                store_hashes(conn, [hash_value for _, hash_value in notices[:5]], 'notice')
+                store_hashes(conn, [hash_value for _, hash_value in jobs[:5]], 'job')
+                set_initialization_complete(conn)
+                print("Database initialized with recent notices and jobs.")
+            else:
+                # Send new notices
+                new_notice_hashes = set()
+                for message, notice_hash in notices:
+                    if notice_hash not in recent_notice_hashes:
+                        send_whatsapp_message(f"📢 *New Notice on TNP Website:*\n{message}")
+                        new_notice_hashes.add(notice_hash)
+                store_hashes(conn, new_notice_hashes, 'notice')
 
-            # Send new notices
-            new_notice_hashes = set()
-            for message, notice_hash in notices:
-                if notice_hash not in recent_notice_hashes:
-                    send_whatsapp_message(f"📢 *New Notice on TNP Website:*\n{message}")
-                    new_notice_hashes.add(notice_hash)
-            initialize_hashes(conn, new_notice_hashes, 'notice')
-
-            # Send new job listings
-            new_job_hashes = set()
-            for message, job_hash in jobs:
-                if job_hash not in recent_job_hashes:
-                    send_whatsapp_message(f"📢 *New Job Listing on TNP Website:*\n{message}")
-                    new_job_hashes.add(job_hash)
-            initialize_hashes(conn, new_job_hashes, 'job')
+                # Send new job listings
+                new_job_hashes = set()
+                for message, job_hash in jobs:
+                    if job_hash not in recent_job_hashes:
+                        send_whatsapp_message(f"📢 *New Job Listing on TNP Website:*\n{message}")
+                        new_job_hashes.add(job_hash)
+                store_hashes(conn, new_job_hashes, 'job')
 
     except Exception as e:
         error_message = f"❌ *Error in TNP Monitor:*\n{e}"
