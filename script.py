@@ -31,10 +31,22 @@ HEADERS = {
 
 def get_session():
     """
-    Creates a new HTTP session with predefined headers.
+    Creates a new HTTP session with predefined headers and retry strategy.
     """
     session = requests.Session()
     session.headers.update(HEADERS)
+    
+    # Define a retry strategy to handle transient failures
+    retries = requests.adapters.Retry(
+        total=5,
+        backoff_factor=1,
+        status_forcelist=[502, 503, 504],
+        method_whitelist=["GET", "POST"]
+    )
+    adapter = requests.adapters.HTTPAdapter(max_retries=retries)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    
     return session
 
 def login(session):
@@ -196,26 +208,39 @@ def extract_all_notices(content, cutoff, ist):
             else:
                 full_link = f"https://tp.bitmesra.co.in/{link}"
 
-            # Capture additional description from 'small' tag
+            # Capture notice type from 'b' tag within 'small' tag
             small_tag = info_td.find('small')
             if small_tag:
-                additional_info = ' '.join(small_tag.stripped_strings)
+                b_tag = small_tag.find('b')
+                if b_tag:
+                    notice_type = b_tag.get_text(strip=True).lower()
+                else:
+                    notice_type = ''
             else:
-                additional_info = ''
+                notice_type = ''
 
-            # Determine the type of notice based on 'additional_info' using regex for flexibility
+            # Determine the type of notice based on 'notice_type' using regex for flexibility
             job_patterns = [
-                r'\bjob\b',
                 r'\bjob final result\b',
                 r'\bjob result\b',
                 r'\bjob update\b',
                 r'\bjob listing\b',
-                r'\bjob announcement\b'
+                r'\bjob announcement\b',
+                r'\bjob\b'  # General job keyword
             ]
-            if any(re.search(pattern, additional_info.lower()) for pattern in job_patterns):
+            if any(re.search(pattern, notice_type) for pattern in job_patterns):
                 message_type = "New Job Listing on TNP Website"
             else:
                 message_type = "New Notice on TNP Website"
+
+            # Capture additional details excluding 'b' tag
+            if small_tag:
+                # Remove 'b' tag and extract remaining text
+                for b in small_tag.find_all('b'):
+                    b.decompose()
+                additional_info = ' '.join(small_tag.stripped_strings)
+            else:
+                additional_info = ''
 
             # Construct the Telegram message with Markdown formatting
             message = (
@@ -293,7 +318,7 @@ def main():
 
             # Convert cutoff to UTC for querying hashes
             cutoff_utc = cutoff.astimezone(pytz.UTC)
-            print(f"Cutoff time in UTC: {cutoff_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+            print(f"Cutoff time in UTC: {cutoff_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}\n")
 
             # Retrieve recent hashes to prevent duplicates
             stored_hashes = get_recent_hashes(conn, cutoff_utc)
