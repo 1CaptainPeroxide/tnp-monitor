@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import psycopg2
 from urllib.parse import urlparse
+from pytz import utc  # Added import for UTC timezone
 
 # Load environment variables
 load_dotenv()
@@ -131,7 +132,11 @@ def extract_all_notices(content, cutoff, ist):
             data_order = date_td.get('data-order')
             if data_order:
                 try:
+                    # Parse data_order as UTC time
                     post_datetime = datetime.datetime.strptime(data_order, '%Y/%m/%d %H:%M:%S')
+                    post_datetime = utc.localize(post_datetime)
+                    # Convert to IST
+                    post_datetime = post_datetime.astimezone(ist)
                 except ValueError as ve:
                     print(f"Failed to parse date from data-order '{data_order}': {ve}")
                     continue
@@ -142,11 +147,10 @@ def extract_all_notices(content, cutoff, ist):
                     visible_date_text = visible_date_text[:-4]
                 try:
                     post_datetime = datetime.datetime.strptime(visible_date_text, '%d/%m/%Y %H:%M')
+                    post_datetime = ist.localize(post_datetime)
                 except ValueError as ve:
                     print(f"Failed to parse date from visible text '{visible_date_text}': {ve}")
                     continue
-
-            post_datetime = ist.localize(post_datetime)
 
             # Skip notices older than the cutoff
             if post_datetime < cutoff:
