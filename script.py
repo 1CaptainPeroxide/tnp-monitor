@@ -109,6 +109,9 @@ def cleanup_hashes(conn, cutoff):
         print("Old hashes cleaned up successfully.")
 
 def extract_recent_notices(content, cutoff, ist):
+    """
+    Parses the HTML content and extracts all notices from the past 24 hours based on IST timezone.
+    """
     notices = []
     soup = BeautifulSoup(content, 'html.parser')
     notices_table = soup.find('table', {'id': 'newsevents'})
@@ -118,28 +121,41 @@ def extract_recent_notices(content, cutoff, ist):
 
     for row in notices_table.find('tbody').find_all('tr'):
         try:
+            # Extract date from 'data-order' or fallback to parsing visible date text if missing
             date_td = row.find_all('td')[1]
             data_order = date_td.get('data-order')
-            if not data_order:
-                print("No 'data-order' attribute found for date.")
-                continue
+            
+            if data_order:
+                # Parse the date if 'data-order' is present
+                post_datetime = datetime.datetime.strptime(data_order, '%Y/%m/%d %H:%M:%S')
+            else:
+                # Fallback: attempt to extract from visible text
+                visible_date_text = date_td.get_text(strip=True)
+                post_datetime = datetime.datetime.strptime(visible_date_text, '%d/%m/%Y %H:%M')
 
-            post_datetime = datetime.datetime.strptime(data_order, '%Y/%m/%d %H:%M:%S')
+            # Localize to IST timezone
             post_datetime = ist.localize(post_datetime)
 
+            # Only include notices from the past 24 hours
             if post_datetime < cutoff:
                 continue
 
+            # Extract title and link, adjusting for varied structures
             title_tag = row.find('h6').find('a')
             title = title_tag.get_text(strip=True)
             link = title_tag['href']
             full_link = f"https://tp.bitmesra.co.in/{link}"
 
+            # Construct the message
             message = f"Title: {title}\nLink: {full_link}\nDate: {post_datetime.strftime('%d/%m/%Y %H:%M')}"
+
+            # Compute hash for uniqueness check
             notice_hash = compute_hash(message)
             notices.append((message, notice_hash))
+
         except Exception as e:
             print(f"Failed to extract a notice: {e}")
+
     return notices
 
 def extract_recent_jobs(content, cutoff, ist):
