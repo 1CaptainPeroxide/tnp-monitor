@@ -9,14 +9,6 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import psycopg2
 from urllib.parse import urlparse
-import logging
-
-# Configure logging
-logging.basicConfig(
-    filename='tnp_monitor.log',
-    level=logging.INFO,
-    format='%(asctime)s %(levelname)s:%(message)s'
-)
 
 # Load environment variables
 load_dotenv()
@@ -60,50 +52,26 @@ def login(session):
             error_text = error_message.get_text(strip=True) if error_message else "Unknown login error."
             raise Exception(f"Login failed. Server message: {error_text}")
 
-        logging.info("Logged in successfully.")
+        print("Logged in successfully.")
 
     except Exception as e:
-        logging.error(f"An error occurred during login: {e}")
-        raise
+        raise Exception(f"An error occurred during login: {e}")
 
-def fetch_all_notices(session):
-    all_notices = []
-    ist = pytz.timezone('Asia/Kolkata')
-    now = datetime.datetime.now(ist)
-    cutoff = now - timedelta(hours=24)
-    
-    # Initial parameters for DataTables
-    params = {
-        'draw': 1,
-        'start': 0,
-        'length': 100,  # Adjust based on server capabilities
-        'search[value]': '',
-        'search[regex]': 'false'
-    }
-    
-    while True:
-        try:
-            response = session.post(NOTICES_URL, data=params)
-            response.raise_for_status()
-            data = response.json()  # Adjust based on actual response
-            notices_html = data.get('html', '')  # Adjust accordingly
-            notices, jobs = extract_all_notices(notices_html, cutoff, ist)
-            if not notices and not jobs:
-                break
-            all_notices.extend(notices)
-            all_jobs.extend(jobs)
-            
-            # Check if there are more pages
-            if len(notices) + len(jobs) < params['length']:
-                break
-            params['start'] += params['length']
-            params['draw'] += 1
-            logging.info(f"Fetched page {params['draw']} with start {params['start']}")
-            time.sleep(1)  # Politeness delay
-        except Exception as e:
-            logging.error(f"An error occurred while fetching notices: {e}")
-            break
-    return all_notices, all_jobs
+def fetch_notices(session):
+    try:
+        response = session.get(NOTICES_URL)
+        response.raise_for_status()
+        return response.text
+    except Exception as e:
+        raise Exception(f"An error occurred while fetching notices: {e}")
+
+def fetch_jobs(session):
+    try:
+        response = session.get(JOBS_URL)
+        response.raise_for_status()
+        return response.text
+    except Exception as e:
+        raise Exception(f"An error occurred while fetching job listings: {e}")
 
 def compute_hash(content):
     return hashlib.md5(content.encode('utf-8')).hexdigest()
@@ -126,76 +94,135 @@ def update_hashes(conn, new_hashes):
         for new_hash in new_hashes:
             cur.execute("INSERT INTO hashes (hash) VALUES (%s);", (new_hash,))
         conn.commit()
-    logging.info("Hashes updated successfully.")
+    print("Hashes updated successfully.")
 
 def cleanup_hashes(conn, cutoff):
     with conn.cursor() as cur:
         cur.execute("DELETE FROM hashes WHERE timestamp < %s;", (cutoff,))
         conn.commit()
-        logging.info("Old hashes cleaned up successfully.")
+        print("Old hashes cleaned up successfully.")
 
 def extract_all_notices(content, cutoff, ist):
+    """
+    Extracts all notices from the HTML content, including all types like "Job", "Job Final Result", "News", etc.
+    """
     notices = []
-    jobs = []
     soup = BeautifulSoup(content, 'html.parser')
     notices_table = soup.find('table', {'id': 'newsevents'})
     if not notices_table:
-        logging.warning("No notices table found.")
-        return notices, jobs
+        print("No notices table found.")
+        return notices
 
-    for row in notices_table.find('tbody').find_all('tr'):
+    tbody = notices_table.find('tbody')
+    if not tbody:
+        print("No tbody in notices table.")
+        return notices
+
+    for row in tbody.find_all('tr'):
         try:
-            # Extract the date from the 'data-order' attribute if available
-            date_td = row.find_all('td')[1]
+            # Extract all 'td' elements
+            td_list = row.find_all('td')
+            if len(td_list) < 2:
+                print("Row does not have enough 'td' elements.")
+                continue
+
+            # Extract the date
+            date_td = td_list[1]
             data_order = date_td.get('data-order')
             if data_order:
-                post_datetime = datetime.datetime.strptime(data_order, '%Y/%m/%d %H:%M:%S')
+                try:
+                    post_datetime = datetime.datetime.strptime(data_order, '%Y/%m/%d %H:%M:%S')
+                except ValueError as ve:
+                    print(f"Failed to parse date from data-order '{data_order}': {ve}")
+                    continue
             else:
                 visible_date_text = date_td.get_text(strip=True)
-                post_datetime = datetime.datetime.strptime(visible_date_text, '%d/%m/%Y %H:%M')
+                # Remove ' IST' from the date text if present
+                if visible_date_text.endswith(' IST'):
+                    visible_date_text = visible_date_text[:-4]
+                try:
+                    post_datetime = datetime.datetime.strptime(visible_date_text, '%d/%m/%Y %H:%M')
+                except ValueError as ve:
+                    print(f"Failed to parse date from visible text '{visible_date_text}': {ve}")
+                    continue
+
             post_datetime = ist.localize(post_datetime)
 
+            # Skip notices older than the cutoff
             if post_datetime < cutoff:
                 continue
 
             # Extract the notice title and URL
-            title_tag = row.find('h6').find('a')
+            h6_tag = row.find('h6')
+            if not h6_tag:
+                print("No 'h6' tag found in row.")
+                continue
+            title_tag = h6_tag.find('a')
+            if not title_tag:
+                print("No 'a' tag found in 'h6' tag.")
+                continue
             title = title_tag.get_text(strip=True)
-            link = title_tag['href']
+            link = title_tag.get('href', '')
             full_link = f"https://tp.bitmesra.co.in/{link}"
 
-            # Capture additional description (like "Job", "Job Final Result", etc.)
+            # Capture additional description
             small_tag = row.find('small')
-            additional_info = small_tag.get_text(" ", strip=True) if small_tag else "No additional info"
-
-            # Construct the message with title, link, date, and additional description
-            message = (
-                f"Title: {title}\n"
-                f"Link: {full_link}\n"
-                f"Date: {post_datetime.strftime('%d/%m/%Y %H:%M')}\n"
-                f"Details: {additional_info}"
-            )
-            notice_hash = compute_hash(message)
-
-            # Determine if it's a job-related notice
-            if "Job" in additional_info:
-                jobs.append((message, notice_hash))
+            if small_tag:
+                additional_info = small_tag.get_text(" ", strip=True)
             else:
-                notices.append((message, notice_hash))
+                additional_info = ''
+
+            # Construct the message
+            message = f"Title: {title}\nLink: {full_link}\nDate: {post_datetime.strftime('%d/%m/%Y %H:%M')}\nDetails: {additional_info}"
+            notice_hash = compute_hash(message)
+            notices.append((message, notice_hash))
 
         except Exception as e:
-            logging.error(f"Failed to extract a notice: {e}")
-    return notices, jobs
+            print(f"Failed to extract a notice: {e}")
+    return notices
+
+def extract_recent_jobs(content, cutoff, ist):
+    jobs = []
+    soup = BeautifulSoup(content, 'html.parser')
+    job_table = soup.find('table', {'id': 'job-listings'})
+    if not job_table:
+        print("No job listings table found.")
+        return jobs
+
+    for row in job_table.find('tbody').find_all('tr'):
+        try:
+            date_td = row.find_all('td')[1]
+            data_order = date_td.get('data-order')
+            if not data_order:
+                continue
+            post_date = datetime.datetime.strptime(data_order, '%Y/%m/%d').date()
+            post_datetime = ist.localize(datetime.datetime.combine(post_date, datetime.time.min))
+            if post_datetime < cutoff:
+                continue
+
+            company_name = row.find_all('td')[0].get_text(strip=True)
+            apply_link_tag = row.find_all('a')
+            apply_link = "No link available"
+            for link_tag in apply_link_tag:
+                if "Apply" in link_tag.get_text():
+                    apply_link = f"https://tp.bitmesra.co.in/{link_tag['href']}"
+                    break
+            message = f"New Job Listing:\nCompany: {company_name}\nDate: {post_date.strftime('%d/%m/%Y')}\nApply here: {apply_link}"
+            job_hash = compute_hash(message)
+            jobs.append((message, job_hash))
+        except Exception as e:
+            print(f"Failed to extract a job listing: {e}")
+    return jobs
 
 def send_telegram_message(message):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'Markdown'}
+        payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message}
         response = requests.post(url, data=payload)
         response.raise_for_status()
-        logging.info("Telegram message sent successfully.")
+        print("Telegram message sent successfully.")
     except Exception as e:
-        logging.error(f"Failed to send Telegram message: {e}")
+        print(f"Failed to send Telegram message: {e}")
 
 def main():
     session = get_session()
@@ -207,8 +234,11 @@ def main():
 
         login(session)
 
-        # Fetch all notices and jobs across all pages
-        all_notices, all_jobs = fetch_all_notices(session)
+        notices_html = fetch_notices(session)
+        jobs_html = fetch_jobs(session)
+
+        recent_notices = extract_all_notices(notices_html, cutoff, ist)
+        recent_jobs = extract_recent_jobs(jobs_html, cutoff, ist)
 
         if DATABASE_URL:
             result = urlparse(DATABASE_URL)
@@ -220,13 +250,13 @@ def main():
             stored_hashes = get_recent_hashes(conn, cutoff)
 
             new_notice_hashes = set()
-            for message, notice_hash in all_notices:
+            for message, notice_hash in recent_notices:
                 if notice_hash not in stored_hashes:
                     send_telegram_message(f"📢 *New Notice on TNP Website:*\n{message}")
                     new_notice_hashes.add(notice_hash)
 
             new_job_hashes = set()
-            for message, job_hash in all_jobs:
+            for message, job_hash in recent_jobs:
                 if job_hash not in stored_hashes:
                     send_telegram_message(f"📢 *New Job Listing on TNP Website:*\n{message}")
                     new_job_hashes.add(job_hash)
@@ -236,11 +266,11 @@ def main():
 
     except Exception as e:
         error_message = f"❌ *Error in TNP Monitor:*\n{e}"
-        logging.error(error_message)
+        print(error_message)
         try:
             send_telegram_message(error_message)
         except Exception as send_error:
-            logging.error(f"Failed to send error notification: {send_error}")
+            print(f"Failed to send error notification: {send_error}")
 
     finally:
         if conn:
