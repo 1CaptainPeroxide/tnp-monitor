@@ -6,7 +6,6 @@ from datetime import timedelta
 import pytz
 import requests
 from bs4 import BeautifulSoup
-from twilio.rest import Client
 from dotenv import load_dotenv
 import psycopg2
 from urllib.parse import urlparse
@@ -17,17 +16,9 @@ load_dotenv()
 # Environment Variables
 TP_USERNAME = os.getenv('TP_USERNAME')
 TP_PASSWORD = os.getenv('TP_PASSWORD')
-TWILIO_SID = os.getenv('TWILIO_ACCOUNT_SID')
-TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
-TWILIO_WHATSAPP_NUMBER = os.getenv('TWILIO_WHATSAPP_NUMBER')
-YOUR_WHATSAPP_NUMBER = os.getenv('YOUR_WHATSAPP_NUMBER')
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')  # Set this to your group chat or personal chat ID
 DATABASE_URL = os.getenv('DATABASE_URL')
-
-# Load Friends' WhatsApp numbers as a list
-FRIENDS_WHATSAPP_NUMBERS = os.getenv('FRIENDS_WHATSAPP_NUMBERS', '').split(',')
-
-# Initialize Twilio client
-client = Client(TWILIO_SID, TWILIO_AUTH_TOKEN)
 
 # URLs for login and notices
 LOGIN_URL = "https://tp.bitmesra.co.in/auth/login.html"
@@ -188,27 +179,21 @@ def extract_recent_jobs(content, cutoff, ist):
             print(f"Failed to extract a job listing: {e}")
     return jobs
 
-def send_whatsapp_message(message):
+def send_telegram_message(message):
+    """
+    Sends a message to a Telegram chat.
+    """
     try:
-        client.messages.create(
-            body=message,
-            from_=TWILIO_WHATSAPP_NUMBER,
-            to=YOUR_WHATSAPP_NUMBER
-        )
-        print("WhatsApp message sent to your number successfully.")
-
-        for friend_number in FRIENDS_WHATSAPP_NUMBERS:
-            friend_number = friend_number.strip()
-            if friend_number:
-                time.sleep(1.1)
-                client.messages.create(
-                    body=message,
-                    from_=TWILIO_WHATSAPP_NUMBER,
-                    to=friend_number
-                )
-                print(f"WhatsApp message sent to {friend_number} successfully.")
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            'chat_id': TELEGRAM_CHAT_ID,
+            'text': message
+        }
+        response = requests.post(url, data=payload)
+        response.raise_for_status()
+        print("Telegram message sent successfully.")
     except Exception as e:
-        raise Exception(f"Failed to send WhatsApp message: {e}")
+        raise Exception(f"Failed to send Telegram message: {e}")
 
 def main():
     session = get_session()
@@ -238,13 +223,13 @@ def main():
             new_notice_hashes = set()
             for message, notice_hash in recent_notices:
                 if notice_hash not in stored_hashes:
-                    send_whatsapp_message(f"📢 *New Notice on TNP Website:*\n{message}")
+                    send_telegram_message(f"📢 *New Notice on TNP Website:*\n{message}")
                     new_notice_hashes.add(notice_hash)
 
             new_job_hashes = set()
             for message, job_hash in recent_jobs:
                 if job_hash not in stored_hashes:
-                    send_whatsapp_message(f"📢 *New Job Listing on TNP Website:*\n{message}")
+                    send_telegram_message(f"📢 *New Job Listing on TNP Website:*\n{message}")
                     new_job_hashes.add(job_hash)
 
             update_hashes(conn, new_notice_hashes.union(new_job_hashes))
@@ -254,7 +239,7 @@ def main():
         error_message = f"❌ *Error in TNP Monitor:*\n{e}"
         print(error_message)
         try:
-            send_whatsapp_message(error_message)
+            send_telegram_message(error_message)
         except Exception as send_error:
             print(f"Failed to send error notification: {send_error}")
 
