@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import psycopg2
 from urllib.parse import urlparse
+import re
 
 # Load environment variables from .env file
 load_dotenv()
@@ -41,8 +42,10 @@ def login(session):
     Logs into the TNP portal using provided credentials.
     """
     try:
+        print("Attempting to log in...")
         response = session.get(LOGIN_URL)
         response.raise_for_status()
+        
         login_data = {
             'identity': TP_USERNAME,
             'password': TP_PASSWORD,
@@ -67,8 +70,10 @@ def fetch_notices(session):
     Fetches the HTML content of the notices page.
     """
     try:
+        print("Fetching notices page...")
         response = session.get(NOTICES_URL)
         response.raise_for_status()
+        print("Notices page fetched successfully.")
         return response.text
     except Exception as e:
         raise Exception(f"An error occurred while fetching notices: {e}")
@@ -79,9 +84,9 @@ def compute_hash(content):
     """
     return hashlib.md5(content.encode('utf-8')).hexdigest()
 
-def get_recent_hashes(conn, cutoff):
+def get_recent_hashes(conn, cutoff_utc):
     """
-    Retrieves hashes from the database that are newer than the cutoff datetime.
+    Retrieves hashes from the database that are newer than the cutoff datetime (in UTC).
     """
     with conn.cursor() as cur:
         # Create the hashes table if it doesn't exist
@@ -89,12 +94,13 @@ def get_recent_hashes(conn, cutoff):
             CREATE TABLE IF NOT EXISTS hashes (
                 id SERIAL PRIMARY KEY,
                 hash TEXT NOT NULL,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
         """)
         # Select hashes within the retention period (e.g., last 7 days)
-        cur.execute("SELECT hash FROM hashes WHERE timestamp >= %s;", (cutoff,))
+        cur.execute("SELECT hash FROM hashes WHERE timestamp >= %s;", (cutoff_utc,))
         results = cur.fetchall()
+        print(f"Retrieved {len(results)} recent hashes from the database.")
         return set(row[0] for row in results) if results else set()
 
 def update_hashes(conn, new_hashes):
@@ -105,18 +111,19 @@ def update_hashes(conn, new_hashes):
         for new_hash in new_hashes:
             cur.execute("INSERT INTO hashes (hash) VALUES (%s);", (new_hash,))
         conn.commit()
-    print("Hashes updated successfully.")
+    print(f"Inserted {len(new_hashes)} new hashes into the database.")
 
-def cleanup_hashes(conn, cleanup_cutoff):
+def cleanup_hashes(conn, cleanup_cutoff_utc):
     """
-    Deletes hashes older than the cleanup cutoff datetime to manage database size.
+    Deletes hashes older than the cleanup cutoff datetime (in UTC) to manage database size.
     """
     with conn.cursor() as cur:
-        cur.execute("DELETE FROM hashes WHERE timestamp < %s;", (cleanup_cutoff,))
+        cur.execute("DELETE FROM hashes WHERE timestamp < %s;", (cleanup_cutoff_utc,))
+        deleted = cur.rowcount
         conn.commit()
-        print("Old hashes cleaned up successfully.")
+        print(f"Cleaned up {deleted} old hashes from the database.")
 
-def extract_all_notices(content, cutoff):
+def extract_all_notices(content, cutoff, ist):
     """
     Extracts all notices from the HTML content, including jobs and general notices,
     that were posted within the last 24 hours.
@@ -133,12 +140,15 @@ def extract_all_notices(content, cutoff):
         print("No tbody in notices table.")
         return notices
 
-    for idx, row in enumerate(tbody.find_all('tr')):
+    rows = tbody.find_all('tr')
+    print(f"Found {len(rows)} notices in the table.")
+
+    for idx, row in enumerate(rows):
         try:
             # Extract all 'td' elements
             td_list = row.find_all('td')
             if len(td_list) < 2:
-                print(f"Row {idx + 1} does not have enough 'td' elements. Skipping.")
+                print(f"Row {idx + 1}: Not enough 'td' elements. Skipping.")
                 continue
 
             # Extract the date from 'data-order' attribute
@@ -148,18 +158,20 @@ def extract_all_notices(content, cutoff):
                 try:
                     # Parse 'data-order' as naive datetime (IST)
                     post_datetime = datetime.datetime.strptime(data_order, '%Y/%m/%d %H:%M:%S')
+                    post_datetime = ist.localize(post_datetime)
                 except ValueError as ve:
-                    print(f"Row {idx + 1}: Failed to parse date from data-order '{data_order}': {ve}")
+                    print(f"Row {idx + 1}: Failed to parse date from data-order '{data_order}': {ve}. Skipping.")
                     continue
             else:
                 # Fallback to parsing visible date text if 'data-order' is missing
                 visible_date_text = date_td.get_text(strip=True)
-                if visible_date_text.endswith(' IST'):
-                    visible_date_text = visible_date_text[:-4].strip()
+                if visible_date_text.endswith('IST'):
+                    visible_date_text = visible_date_text[:-3].strip()
                 try:
                     post_datetime = datetime.datetime.strptime(visible_date_text, '%d/%m/%Y %H:%M')
+                    post_datetime = ist.localize(post_datetime)
                 except ValueError as ve:
-                    print(f"Row {idx + 1}: Failed to parse date from visible text '{visible_date_text}': {ve}")
+                    print(f"Row {idx + 1}: Failed to parse date from visible text '{visible_date_text}': {ve}. Skipping.")
                     continue
 
             # Skip notices older than the cutoff (24 hours)
@@ -168,13 +180,14 @@ def extract_all_notices(content, cutoff):
                 continue
 
             # Extract the notice title and URL
-            h6_tag = row.find('h6')
+            info_td = td_list[0]
+            h6_tag = info_td.find('h6')
             if not h6_tag:
-                print(f"Row {idx + 1}: No 'h6' tag found. Skipping.")
+                print(f"Row {idx + 1}: No 'h6' tag found in 'Info' column. Skipping.")
                 continue
             title_tag = h6_tag.find('a')
             if not title_tag:
-                print(f"Row {idx + 1}: No 'a' tag found in 'h6'. Skipping.")
+                print(f"Row {idx + 1}: No 'a' tag found within 'h6'. Skipping.")
                 continue
             title = title_tag.get_text(strip=True)
             link = title_tag.get('href', '')
@@ -184,19 +197,27 @@ def extract_all_notices(content, cutoff):
                 full_link = f"https://tp.bitmesra.co.in/{link}"
 
             # Capture additional description from 'small' tag
-            small_tag = row.find('small')
+            small_tag = info_td.find('small')
             if small_tag:
-                additional_info = small_tag.get_text(" ", strip=True)
+                additional_info = ' '.join(small_tag.stripped_strings)
             else:
                 additional_info = ''
 
-            # Determine the type of notice based on 'additional_info'
-            if 'job' in additional_info.lower():
+            # Determine the type of notice based on 'additional_info' using regex for flexibility
+            job_patterns = [
+                r'\bjob\b',
+                r'\bjob final result\b',
+                r'\bjob result\b',
+                r'\bjob update\b',
+                r'\bjob listing\b',
+                r'\bjob announcement\b'
+            ]
+            if any(re.search(pattern, additional_info.lower()) for pattern in job_patterns):
                 message_type = "New Job Listing on TNP Website"
             else:
                 message_type = "New Notice on TNP Website"
 
-            # Construct the Telegram message
+            # Construct the Telegram message with Markdown formatting
             message = (
                 f"📢 *{message_type}:*\n"
                 f"**Title:** {title}\n"
@@ -206,11 +227,13 @@ def extract_all_notices(content, cutoff):
             )
             notice_hash = compute_hash(message)
             notices.append((message, notice_hash))
-            print(f"Row {idx + 1}: Notice extracted and added.")
+            print(f"Row {idx + 1}: Notice extracted successfully.")
 
         except Exception as e:
-            print(f"Row {idx + 1}: Failed to extract a notice: {e}")
-            print(f"Row {idx + 1} HTML: {row}")
+            print(f"Row {idx + 1}: Unexpected error: {e}. Skipping.")
+            continue
+
+    print(f"Total new notices extracted: {len(notices)}")
     return notices
 
 def send_telegram_message(message):
@@ -236,11 +259,9 @@ def main():
     try:
         ist = pytz.timezone('Asia/Kolkata')
         now = datetime.datetime.now(ist)
-        # Make 'now' naive by removing timezone info
-        now_naive = now.replace(tzinfo=None)
-        cutoff = now_naive - timedelta(hours=24)
-        print(f"Current time (IST): {now_naive}")
-        print(f"Cutoff time (24 hours ago): {cutoff}")
+        cutoff = now - timedelta(hours=24)
+        print(f"\nCurrent time (IST): {now.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Cutoff time (24 hours ago): {cutoff.strftime('%Y-%m-%d %H:%M:%S')}\n")
 
         # Log into the TNP portal
         login(session)
@@ -249,8 +270,8 @@ def main():
         notices_html = fetch_notices(session)
 
         # Extract recent notices
-        recent_notices = extract_all_notices(notices_html, cutoff)
-        print(f"Total recent notices extracted: {len(recent_notices)}")
+        recent_notices = extract_all_notices(notices_html, cutoff, ist)
+        print(f"\nTotal new notices to process: {len(recent_notices)}\n")
 
         if DATABASE_URL:
             # Parse the DATABASE_URL
@@ -263,14 +284,19 @@ def main():
                 port=result.port, 
                 sslmode='require'
             )
+            print("Connected to the database successfully.")
 
             # Define cleanup cutoff for hashes (e.g., retain hashes for 7 days)
-            cleanup_cutoff = now_naive - timedelta(days=7)
-            print(f"Hash cleanup cutoff (7 days ago): {cleanup_cutoff}")
+            cleanup_cutoff = now - timedelta(days=7)
+            cleanup_cutoff_utc = cleanup_cutoff.astimezone(pytz.UTC)
+            print(f"Hash cleanup cutoff (7 days ago): {cleanup_cutoff_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}\n")
+
+            # Convert cutoff to UTC for querying hashes
+            cutoff_utc = cutoff.astimezone(pytz.UTC)
+            print(f"Cutoff time in UTC: {cutoff_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}")
 
             # Retrieve recent hashes to prevent duplicates
-            stored_hashes = get_recent_hashes(conn, cleanup_cutoff)
-            print(f"Stored hashes retrieved: {len(stored_hashes)}")
+            stored_hashes = get_recent_hashes(conn, cutoff_utc)
 
             new_hashes = set()
             for message, notice_hash in recent_notices:
@@ -287,7 +313,7 @@ def main():
                 print("No new notices to update.")
 
             # Clean up old hashes
-            cleanup_hashes(conn, cleanup_cutoff)
+            cleanup_hashes(conn, cleanup_cutoff_utc)
 
         else:
             print("DATABASE_URL not set. Cannot store or retrieve hashes.")
