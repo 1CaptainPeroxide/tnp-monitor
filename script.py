@@ -1,6 +1,5 @@
 import os
 import hashlib
-import time
 import datetime
 from datetime import timedelta
 import pytz
@@ -9,7 +8,6 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import psycopg2
 from urllib.parse import urlparse
-from pytz import utc  # Added import for UTC timezone
 
 # Load environment variables
 load_dotenv()
@@ -77,7 +75,7 @@ def fetch_jobs(session):
 def compute_hash(content):
     return hashlib.md5(content.encode('utf-8')).hexdigest()
 
-def get_recent_hashes(conn, cutoff):
+def get_recent_hashes(conn):
     with conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS hashes (
@@ -86,7 +84,7 @@ def get_recent_hashes(conn, cutoff):
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
-        cur.execute("SELECT hash FROM hashes WHERE timestamp >= %s;", (cutoff,))
+        cur.execute("SELECT hash FROM hashes;")
         results = cur.fetchall()
         return set(row[0] for row in results) if results else set()
 
@@ -119,8 +117,9 @@ def extract_all_notices(content, cutoff, ist):
         print("No tbody in notices table.")
         return notices
 
-    for row in tbody.find_all('tr'):
+    for idx, row in enumerate(tbody.find_all('tr')):
         try:
+            print(f"\nProcessing row {idx + 1}:")
             # Extract all 'td' elements
             td_list = row.find_all('td')
             if len(td_list) < 2:
@@ -132,11 +131,10 @@ def extract_all_notices(content, cutoff, ist):
             data_order = date_td.get('data-order')
             if data_order:
                 try:
-                    # Parse data_order as UTC time
+                    # Parse data_order as IST time
                     post_datetime = datetime.datetime.strptime(data_order, '%Y/%m/%d %H:%M:%S')
-                    post_datetime = utc.localize(post_datetime)
-                    # Convert to IST
-                    post_datetime = post_datetime.astimezone(ist)
+                    post_datetime = ist.localize(post_datetime)
+                    print(f"Parsed date from data-order: {post_datetime}")
                 except ValueError as ve:
                     print(f"Failed to parse date from data-order '{data_order}': {ve}")
                     continue
@@ -144,16 +142,18 @@ def extract_all_notices(content, cutoff, ist):
                 visible_date_text = date_td.get_text(strip=True)
                 # Remove ' IST' from the date text if present
                 if visible_date_text.endswith(' IST'):
-                    visible_date_text = visible_date_text[:-4]
+                    visible_date_text = visible_date_text[:-4].strip()
                 try:
                     post_datetime = datetime.datetime.strptime(visible_date_text, '%d/%m/%Y %H:%M')
                     post_datetime = ist.localize(post_datetime)
+                    print(f"Parsed date from visible text: {post_datetime}")
                 except ValueError as ve:
                     print(f"Failed to parse date from visible text '{visible_date_text}': {ve}")
                     continue
 
             # Skip notices older than the cutoff
             if post_datetime < cutoff:
+                print(f"Notice date {post_datetime} is older than cutoff {cutoff}. Skipping.")
                 continue
 
             # Extract the notice title and URL
@@ -167,22 +167,31 @@ def extract_all_notices(content, cutoff, ist):
                 continue
             title = title_tag.get_text(strip=True)
             link = title_tag.get('href', '')
-            full_link = f"https://tp.bitmesra.co.in/{link}"
+            if link.startswith('/'):
+                full_link = f"https://tp.bitmesra.co.in{link}"
+            else:
+                full_link = f"https://tp.bitmesra.co.in/{link}"
+            print(f"Extracted title: {title}")
+            print(f"Extracted link: {full_link}")
 
             # Capture additional description
             small_tag = row.find('small')
             if small_tag:
                 additional_info = small_tag.get_text(" ", strip=True)
+                print(f"Extracted additional info: {additional_info}")
             else:
                 additional_info = ''
+                print("No 'small' tag found for additional info.")
 
             # Construct the message
             message = f"Title: {title}\nLink: {full_link}\nDate: {post_datetime.strftime('%d/%m/%Y %H:%M')}\nDetails: {additional_info}"
             notice_hash = compute_hash(message)
+            print(f"Computed hash: {notice_hash}")
             notices.append((message, notice_hash))
 
         except Exception as e:
             print(f"Failed to extract a notice: {e}")
+            print(f"Row HTML: {row}")
     return notices
 
 def extract_recent_jobs(content, cutoff, ist):
@@ -193,15 +202,19 @@ def extract_recent_jobs(content, cutoff, ist):
         print("No job listings table found.")
         return jobs
 
-    for row in job_table.find('tbody').find_all('tr'):
+    for idx, row in enumerate(job_table.find('tbody').find_all('tr')):
         try:
+            print(f"\nProcessing job row {idx + 1}:")
             date_td = row.find_all('td')[1]
             data_order = date_td.get('data-order')
             if not data_order:
+                print("No 'data-order' attribute in date_td.")
                 continue
             post_date = datetime.datetime.strptime(data_order, '%Y/%m/%d').date()
             post_datetime = ist.localize(datetime.datetime.combine(post_date, datetime.time.min))
+            print(f"Parsed job date: {post_datetime}")
             if post_datetime < cutoff:
+                print(f"Job date {post_datetime} is older than cutoff {cutoff}. Skipping.")
                 continue
 
             company_name = row.find_all('td')[0].get_text(strip=True)
@@ -209,10 +222,17 @@ def extract_recent_jobs(content, cutoff, ist):
             apply_link = "No link available"
             for link_tag in apply_link_tag:
                 if "Apply" in link_tag.get_text():
-                    apply_link = f"https://tp.bitmesra.co.in/{link_tag['href']}"
+                    href = link_tag.get('href', '')
+                    if href.startswith('/'):
+                        apply_link = f"https://tp.bitmesra.co.in{href}"
+                    else:
+                        apply_link = f"https://tp.bitmesra.co.in/{href}"
                     break
+            print(f"Extracted company name: {company_name}")
+            print(f"Extracted apply link: {apply_link}")
             message = f"New Job Listing:\nCompany: {company_name}\nDate: {post_date.strftime('%d/%m/%Y')}\nApply here: {apply_link}"
             job_hash = compute_hash(message)
+            print(f"Computed job hash: {job_hash}")
             jobs.append((message, job_hash))
         except Exception as e:
             print(f"Failed to extract a job listing: {e}")
@@ -221,7 +241,11 @@ def extract_recent_jobs(content, cutoff, ist):
 def send_telegram_message(message):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message}
+        payload = {
+            'chat_id': TELEGRAM_CHAT_ID,
+            'text': message,
+            'parse_mode': 'Markdown'  # Enable Markdown parsing
+        }
         response = requests.post(url, data=payload)
         response.raise_for_status()
         print("Telegram message sent successfully.")
@@ -235,6 +259,8 @@ def main():
         ist = pytz.timezone('Asia/Kolkata')
         now = datetime.datetime.now(ist)
         cutoff = now - timedelta(hours=24)
+        print(f"Current time: {now}")
+        print(f"Cutoff time: {cutoff}")
 
         login(session)
 
@@ -251,22 +277,27 @@ def main():
                 host=result.hostname, port=result.port, sslmode='require'
             )
 
-            stored_hashes = get_recent_hashes(conn, cutoff)
+            stored_hashes = get_recent_hashes(conn)
 
             new_notice_hashes = set()
             for message, notice_hash in recent_notices:
                 if notice_hash not in stored_hashes:
                     send_telegram_message(f"📢 *New Notice on TNP Website:*\n{message}")
                     new_notice_hashes.add(notice_hash)
+                else:
+                    print("Notice already sent. Skipping.")
 
             new_job_hashes = set()
             for message, job_hash in recent_jobs:
                 if job_hash not in stored_hashes:
                     send_telegram_message(f"📢 *New Job Listing on TNP Website:*\n{message}")
                     new_job_hashes.add(job_hash)
+                else:
+                    print("Job listing already sent. Skipping.")
 
             update_hashes(conn, new_notice_hashes.union(new_job_hashes))
-            cleanup_hashes(conn, cutoff)
+            cutoff_for_cleanup = now - timedelta(days=7)  # Keep hashes for 7 days
+            cleanup_hashes(conn, cutoff_for_cleanup)
 
     except Exception as e:
         error_message = f"❌ *Error in TNP Monitor:*\n{e}"
