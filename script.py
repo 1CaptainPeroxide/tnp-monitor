@@ -103,6 +103,9 @@ def cleanup_hashes(conn, cutoff):
         print("Old hashes cleaned up successfully.")
 
 def extract_all_notices(content, cutoff, ist):
+    """
+    Extracts all notices from the HTML content, including all types like "Job", "Job Final Result", "News", etc.
+    """
     notices = []
     soup = BeautifulSoup(content, 'html.parser')
     notices_table = soup.find('table', {'id': 'newsevents'})
@@ -112,6 +115,7 @@ def extract_all_notices(content, cutoff, ist):
 
     for row in notices_table.find('tbody').find_all('tr'):
         try:
+            # Extract the date from the 'data-order' attribute if available
             date_td = row.find_all('td')[1]
             data_order = date_td.get('data-order')
             if data_order:
@@ -124,11 +128,17 @@ def extract_all_notices(content, cutoff, ist):
             if post_datetime < cutoff:
                 continue
 
+            # Extract the notice title and URL
             title_tag = row.find('h6').find('a')
             title = title_tag.get_text(strip=True)
             link = title_tag['href']
             full_link = f"https://tp.bitmesra.co.in/{link}"
-            message = f"Title: {title}\nLink: {full_link}\nDate: {post_datetime.strftime('%d/%m/%Y %H:%M')}"
+
+            # Capture additional description (like "Job", "Job Final Result", etc.)
+            additional_info = row.find('small').get_text(" ", strip=True)
+
+            # Construct the message with title, link, date, and additional description
+            message = f"Title: {title}\nLink: {full_link}\nDate: {post_datetime.strftime('%d/%m/%Y %H:%M')}\nDetails: {additional_info}"
             notice_hash = compute_hash(message)
             notices.append((message, notice_hash))
 
