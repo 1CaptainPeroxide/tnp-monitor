@@ -7,8 +7,7 @@ import pytz
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-import psycopg2
-from urllib.parse import urlparse
+import sqlite3
 from flask import Flask, jsonify, request
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -80,32 +79,37 @@ def fetch_page(session, url):
 def compute_hash(content):
     return hashlib.md5(content.encode('utf-8')).hexdigest()
 
-# 🔹 Database Handling
+# 🔹 SQLite Database Handling
+def get_sqlite_connection():
+    """Get SQLite database connection"""
+    db_path = os.getenv('SQLITE_DB_PATH', 'tnp_monitor.db')
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
+
 def get_recent_hashes(conn, cutoff):
-    with conn.cursor() as cur:
-        cur.execute("""
+    with conn:
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS hashes (
-                id SERIAL PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 hash TEXT NOT NULL,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
-        cur.execute("SELECT hash FROM hashes WHERE timestamp >= %s;", (cutoff,))
-        results = cur.fetchall()
+        cursor = conn.execute("SELECT hash FROM hashes WHERE timestamp >= ?;", (cutoff,))
+        results = cursor.fetchall()
         return set(row[0] for row in results) if results else set()
 
 def update_hashes(conn, new_hashes):
-    with conn.cursor() as cur:
+    with conn:
         for new_hash in new_hashes:
-            cur.execute("INSERT INTO hashes (hash) VALUES (%s);", (new_hash,))
-        conn.commit()
+            conn.execute("INSERT INTO hashes (hash) VALUES (?);", (new_hash,))
     logger.info("✅ Hashes updated successfully.")
 
 def cleanup_hashes(conn, cutoff):
-    with conn.cursor() as cur:
-        cur.execute("DELETE FROM hashes WHERE timestamp < %s;", (cutoff,))
-        conn.commit()
-        logger.info("🗑 Old hashes cleaned up successfully.")
+    with conn:
+        conn.execute("DELETE FROM hashes WHERE timestamp < ?;", (cutoff,))
+    logger.info("🗑 Old hashes cleaned up successfully.")
 
 # 🔹 Notices Extraction
 def extract_notices(content, cutoff, ist):
@@ -215,25 +219,21 @@ def run_tnp_monitor():
         recent_notices = extract_notices(notices_html, cutoff, ist)
         recent_companies = extract_companies(companies_html, cutoff, ist)
 
-        if DATABASE_URL:
-            result = urlparse(DATABASE_URL)
-            conn = psycopg2.connect(
-                database=result.path[1:], user=result.username, password=result.password,
-                host=result.hostname, port=result.port, sslmode='require'
-            )
+        # Use SQLite for local development
+        conn = get_sqlite_connection()
 
-            stored_hashes = get_recent_hashes(conn, cutoff)
-            logger.info(f"🗂 Stored Hashes: {len(stored_hashes)}")
+        stored_hashes = get_recent_hashes(conn, cutoff)
+        logger.info(f"🗂 Stored Hashes: {len(stored_hashes)}")
 
-            new_hashes = set()
-            for message, item_hash in recent_notices + recent_companies:
-                if item_hash not in stored_hashes:
-                    send_telegram_message(message)
-                    new_hashes.add(item_hash)
+        new_hashes = set()
+        for message, item_hash in recent_notices + recent_companies:
+            if item_hash not in stored_hashes:
+                send_telegram_message(message)
+                new_hashes.add(item_hash)
 
-            logger.info(f"🆕 New items found: {len(new_hashes)}")
-            update_hashes(conn, new_hashes)
-            cleanup_hashes(conn, cutoff)
+        logger.info(f"🆕 New items found: {len(new_hashes)}")
+        update_hashes(conn, new_hashes)
+        cleanup_hashes(conn, cutoff)
 
         job_status["last_success"] = datetime.datetime.now().isoformat()
         job_status["error_count"] = 0
@@ -258,9 +258,10 @@ def run_tnp_monitor():
 def home():
     """Home endpoint"""
     return jsonify({
-        "message": "TNP Monitor API",
+        "message": "TNP Monitor API (SQLite Version)",
         "status": "running",
         "version": "1.0.0",
+        "database": "SQLite",
         "endpoints": {
             "/": "This help message",
             "/health": "Health check endpoint",
@@ -276,7 +277,8 @@ def health():
     return jsonify({
         "status": "healthy",
         "timestamp": datetime.datetime.now().isoformat(),
-        "uptime": "running"
+        "uptime": "running",
+        "database": "SQLite"
     })
 
 @app.route('/ping')
@@ -290,13 +292,27 @@ def ping():
 @app.route('/status')
 def status():
     """Get current job status"""
+    # Get scheduler information
+    scheduler_info = []
+    try:
+        for job in scheduler.get_jobs():
+            scheduler_info.append({
+                "id": job.id,
+                "name": job.name,
+                "next_run": str(job.next_run_time) if job.next_run_time else None,
+                "trigger": str(job.trigger)
+            })
+    except:
+        scheduler_info = "Scheduler not available"
+    
     return jsonify({
         "job_status": job_status,
+        "scheduler_jobs": scheduler_info,
         "environment": {
             "has_telegram_token": bool(TELEGRAM_BOT_TOKEN),
             "has_telegram_chat_id": bool(TELEGRAM_CHAT_ID),
-            "has_database_url": bool(DATABASE_URL),
-            "has_tp_credentials": bool(TP_USERNAME and TP_PASSWORD)
+            "has_tp_credentials": bool(TP_USERNAME and TP_PASSWORD),
+            "database_type": "SQLite"
         }
     })
 
@@ -333,6 +349,15 @@ def init_scheduler():
         replace_existing=True
     )
     
+    # Also schedule an immediate run to test
+    scheduler.add_job(
+        func=run_tnp_monitor,
+        trigger='date',  # Run immediately
+        id='tnp_monitor_immediate',
+        name='TNP Monitor Immediate Test',
+        replace_existing=True
+    )
+    
     # Schedule a health check every 5 minutes to keep the app alive
     # Note: This internal health check is a backup. You should also set up an external cron job
     # at cron-job.org to ping your app's /health endpoint every 5 minutes
@@ -353,7 +378,12 @@ def init_scheduler():
     
     scheduler.start()
     logger.info("✅ Scheduler started successfully")
+    logger.info("📅 TNP Monitor job scheduled to run every 30 minutes")
+    logger.info("🚀 Immediate test job scheduled to run now")
     return scheduler
+
+# 🔹 Global scheduler variable
+scheduler = None
 
 # 🔹 Application startup
 if __name__ == '__main__':
