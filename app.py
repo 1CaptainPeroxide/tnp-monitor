@@ -343,7 +343,7 @@ def init_scheduler():
     # Schedule the job to run every 30 minutes
     scheduler.add_job(
         func=run_tnp_monitor,
-        trigger=IntervalTrigger(minutes=30),
+        trigger=IntervalTrigger(minutes=10),
         id='tnp_monitor_job',
         name='TNP Monitor Job',
         replace_existing=True
