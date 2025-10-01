@@ -92,18 +92,21 @@ def get_recent_hashes(conn, cutoff):
         conn.execute("""
             CREATE TABLE IF NOT EXISTS hashes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                hash TEXT NOT NULL,
+                hash TEXT NOT NULL UNIQUE,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
-        cursor = conn.execute("SELECT hash FROM hashes WHERE timestamp >= ?;", (cutoff,))
+        cursor = conn.execute("SELECT hash FROM hashes;")
         results = cursor.fetchall()
         return set(row[0] for row in results) if results else set()
 
 def update_hashes(conn, new_hashes):
     with conn:
         for new_hash in new_hashes:
-            conn.execute("INSERT INTO hashes (hash) VALUES (?);", (new_hash,))
+            try:
+                conn.execute("INSERT OR IGNORE INTO hashes (hash) VALUES (?);", (new_hash,))
+            except:
+                pass
     logger.info("✅ Hashes updated successfully.")
 
 def cleanup_hashes(conn, cutoff):
@@ -149,7 +152,7 @@ def extract_notices(content, cutoff, ist):
 def extract_companies(content, cutoff, ist):
     companies = []
     soup = BeautifulSoup(content, 'html.parser')
-    job_table = soup.find('table')  # ⚠️ Check job table manually if needed
+    job_table = soup.find('table')
 
     if not job_table:
         logger.warning("❌ No companies table found!")
@@ -206,11 +209,11 @@ def run_tnp_monitor():
     
     try:
         session = get_session()
-        conn = None
+        conn = get_sqlite_connection()
         
         ist = pytz.timezone('Asia/Kolkata')
         now = datetime.datetime.now(ist)
-        cutoff = now - timedelta(hours=24)
+        cutoff = now - timedelta(days=7)  # keep hashes 7 days
 
         login(session)
         notices_html = fetch_page(session, NOTICES_URL)
@@ -218,9 +221,6 @@ def run_tnp_monitor():
 
         recent_notices = extract_notices(notices_html, cutoff, ist)
         recent_companies = extract_companies(companies_html, cutoff, ist)
-
-        # Use SQLite for local development
-        conn = get_sqlite_connection()
 
         stored_hashes = get_recent_hashes(conn, cutoff)
         logger.info(f"🗂 Stored Hashes: {len(stored_hashes)}")
@@ -320,7 +320,6 @@ def status():
 def manual_run():
     """Manually trigger the TNP monitor job"""
     try:
-        # Run the job in a separate thread to avoid blocking
         thread = threading.Thread(target=run_tnp_monitor)
         thread.daemon = True
         thread.start()
@@ -340,7 +339,7 @@ def init_scheduler():
     """Initialize the background scheduler"""
     scheduler = BackgroundScheduler()
     
-    # Schedule the job to run every 30 minutes
+    # Schedule the job to run every 10 minutes
     scheduler.add_job(
         func=run_tnp_monitor,
         trigger=IntervalTrigger(minutes=10),
@@ -349,21 +348,11 @@ def init_scheduler():
         replace_existing=True
     )
     
-    # Also schedule an immediate run to test
-    scheduler.add_job(
-        func=run_tnp_monitor,
-        trigger='date',  # Run immediately
-        id='tnp_monitor_immediate',
-        name='TNP Monitor Immediate Test',
-        replace_existing=True
-    )
+    # ❌ Removed immediate run job to prevent duplicate messages
     
-    # Schedule a health check every 5 minutes to keep the app alive
-    # Note: This internal health check is a backup. You should also set up an external cron job
-    # at cron-job.org to ping your app's /health endpoint every 5 minutes
+    # Health check every 5 minutes
     def internal_health_check():
         try:
-            # This is just a local health check, external cron job is more reliable
             logger.info("Internal health check - app is running")
         except Exception as e:
             logger.error(f"Health check error: {e}")
@@ -378,8 +367,7 @@ def init_scheduler():
     
     scheduler.start()
     logger.info("✅ Scheduler started successfully")
-    logger.info("📅 TNP Monitor job scheduled to run every 30 minutes")
-    logger.info("🚀 Immediate test job scheduled to run now")
+    logger.info("📅 TNP Monitor job scheduled to run every 10 minutes")
     return scheduler
 
 # 🔹 Global scheduler variable
@@ -387,9 +375,6 @@ scheduler = None
 
 # 🔹 Application startup
 if __name__ == '__main__':
-    # Initialize the scheduler
     scheduler = init_scheduler()
-    
-    # Run the app
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
