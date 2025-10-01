@@ -1,5 +1,3 @@
-# --- START: minimal fixes applied to your original script ---
-
 import os
 import hashlib
 import time
@@ -85,27 +83,20 @@ def compute_hash(content):
 def get_sqlite_connection():
     """Get SQLite database connection"""
     db_path = os.getenv('SQLITE_DB_PATH', 'tnp_monitor.db')
-    conn = sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+    conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn
 
 def get_recent_hashes(conn, cutoff):
-    # cutoff is expected to be a timezone-aware datetime (IST) in our code,
-    # convert to UTC string format matching SQLite CURRENT_TIMESTAMP (YYYY-MM-DD HH:MM:SS)
-    if isinstance(cutoff, datetime.datetime):
-        cutoff_utc_str = cutoff.astimezone(pytz.UTC).strftime('%Y-%m-%d %H:%M:%S')
-    else:
-        cutoff_utc_str = str(cutoff)
-
     with conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS hashes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 hash TEXT NOT NULL,
-                timestamp TIMESTAMP DEFAULT (datetime('now'))
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
-        cursor = conn.execute("SELECT hash FROM hashes WHERE timestamp >= ?;", (cutoff_utc_str,))
+        cursor = conn.execute("SELECT hash FROM hashes WHERE timestamp >= ?;", (cutoff,))
         results = cursor.fetchall()
         return set(row[0] for row in results) if results else set()
 
@@ -116,14 +107,8 @@ def update_hashes(conn, new_hashes):
     logger.info("✅ Hashes updated successfully.")
 
 def cleanup_hashes(conn, cutoff):
-    # cutoff is expected to be timezone-aware datetime; convert to UTC string
-    if isinstance(cutoff, datetime.datetime):
-        cutoff_utc_str = cutoff.astimezone(pytz.UTC).strftime('%Y-%m-%d %H:%M:%S')
-    else:
-        cutoff_utc_str = str(cutoff)
-
     with conn:
-        conn.execute("DELETE FROM hashes WHERE timestamp < ?;", (cutoff_utc_str,))
+        conn.execute("DELETE FROM hashes WHERE timestamp < ?;", (cutoff,))
     logger.info("🗑 Old hashes cleaned up successfully.")
 
 # 🔹 Notices Extraction
@@ -136,55 +121,21 @@ def extract_notices(content, cutoff, ist):
         logger.warning("❌ No notices table found!")
         return notices
 
-    tbody = notices_table.find('tbody')
-    if not tbody:
-        logger.warning("❌ Notices tbody not found!")
-        return notices
-
-    for row in tbody.find_all('tr'):
+    for row in notices_table.find('tbody').find_all('tr'):
         try:
-            tds = row.find_all('td')
-            if len(tds) < 2:
-                continue
-            date_td = tds[1]
+            date_td = row.find_all('td')[1]
             data_order = date_td.get('data-order')
             if not data_order:
-                # fallback: try visible text
-                visible_date_text = date_td.get_text(strip=True)
-                try:
-                    post_datetime = datetime.datetime.strptime(visible_date_text, '%d/%m/%Y %H:%M')
-                    post_datetime = ist.localize(post_datetime)
-                except Exception:
-                    logger.debug("Skipping notice with unparseable date")
-                    continue
-            else:
-                # parse data-order which in notices seems to be 'YYYY/MM/DD HH:MM:SS'
-                try:
-                    post_datetime = datetime.datetime.strptime(data_order, '%Y/%m/%d %H:%M:%S')
-                    post_datetime = ist.localize(post_datetime)
-                except Exception:
-                    logger.debug("Failed parsing data-order for notice, skipping")
-                    continue
+                continue
 
+            post_datetime = ist.localize(datetime.datetime.strptime(data_order, '%Y/%m/%d %H:%M:%S'))
             if post_datetime < cutoff:
                 continue
 
-            title_h6 = row.find('h6')
-            if not title_h6:
-                logger.debug("No h6 in notice row; skipping")
-                continue
-            title_tag = title_h6.find('a')
-            if not title_tag:
-                logger.debug("No link in notice h6; skipping")
-                continue
-
+            title_tag = row.find('h6').find('a')
             title = title_tag.get_text(strip=True)
-            href = title_tag.get('href', '')
-            if href.startswith('/'):
-                full_link = f"https://tp.bitmesra.co.in{href}"
-            else:
-                full_link = f"https://tp.bitmesra.co.in/{href}"
-
+            full_link = f"https://tp.bitmesra.co.in/{title_tag['href']}"
+            
             message = f"📢 *New Notice:*\n🔹 {title}\n🔗 {full_link}\n📅 {post_datetime.strftime('%d/%m/%Y %H:%M')}"
             notice_hash = compute_hash(message)
             notices.append((message, notice_hash))
@@ -194,63 +145,32 @@ def extract_notices(content, cutoff, ist):
     
     return notices
 
-# 🔹 Companies (Jobs) Extraction — fixed to select correct table id
+# 🔹 Companies Extraction
 def extract_companies(content, cutoff, ist):
     companies = []
     soup = BeautifulSoup(content, 'html.parser')
-    # select the job listings table explicitly
-    job_table = soup.find('table', {'id': 'job-listings'})
+    job_table = soup.find('table')  # ⚠️ Check job table manually if needed
 
     if not job_table:
-        logger.warning("❌ No companies (job-listings) table found!")
-        return companies
-
-    tbody = job_table.find('tbody')
-    if not tbody:
-        logger.warning("❌ job-listings tbody not found!")
+        logger.warning("❌ No companies table found!")
         return companies
 
     logger.info("✅ Companies table found!")
 
-    for row in tbody.find_all('tr'):
+    for row in job_table.find('tbody').find_all('tr'):
         try:
-            tds = row.find_all('td')
-            if len(tds) < 3:
-                continue
-
-            date_td = tds[1]
-            data_order = date_td.get('data-order')
-            if not data_order:
-                logger.debug("Skipping job row with no data-order")
-                continue
-
-            # data_order in job table is like 'YYYY/MM/DD' or 'YYYY/MM/DD HH:MM:SS' — handle both
-            try:
-                post_date = datetime.datetime.strptime(data_order, '%Y/%m/%d').date()
-            except ValueError:
-                try:
-                    post_datetime_tmp = datetime.datetime.strptime(data_order, '%Y/%m/%d %H:%M:%S')
-                    post_date = post_datetime_tmp.date()
-                except Exception:
-                    logger.debug("Unparseable job data-order; skipping row")
-                    continue
-
+            date_td = row.find_all('td')[1]
+            post_date = datetime.datetime.strptime(date_td['data-order'], '%Y/%m/%d').date()
             post_datetime = ist.localize(datetime.datetime.combine(post_date, datetime.time.min))
 
             if post_datetime < cutoff:
                 continue
 
-            company_name = tds[0].get_text(strip=True)
-
+            company_name = row.find_all('td')[0].get_text(strip=True)
             apply_link = "No link available"
-            # find link that contains 'apply' (case-insensitive)
             for link_tag in row.find_all('a'):
-                if 'apply' in link_tag.get_text(strip=True).lower():
-                    href = link_tag.get('href', '')
-                    if href.startswith('/'):
-                        apply_link = f"https://tp.bitmesra.co.in{href}"
-                    else:
-                        apply_link = f"https://tp.bitmesra.co.in/{href}"
+                if "Apply" in link_tag.get_text():
+                    apply_link = f"https://tp.bitmesra.co.in/{link_tag['href']}"
                     break
 
             message = f"🏢 *New Company Listed:*\n🔹 {company_name}\n📅 {post_date.strftime('%d/%m/%Y')}\n🔗 {apply_link}"
@@ -268,8 +188,7 @@ def send_telegram_message(message):
     params = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
     
     try:
-        # use data= for POST form data (safer / more consistent than params=)
-        response = requests.post(url, data=params, timeout=15)
+        response = requests.post(url, params=params)
         response.raise_for_status()
         logger.info("✅ Telegram message sent!")
     except Exception as e:
@@ -303,7 +222,6 @@ def run_tnp_monitor():
         # Use SQLite for local development
         conn = get_sqlite_connection()
 
-        # For SQLite comparisons we must pass cutoff as UTC formatted string
         stored_hashes = get_recent_hashes(conn, cutoff)
         logger.info(f"🗂 Stored Hashes: {len(stored_hashes)}")
 
@@ -314,11 +232,8 @@ def run_tnp_monitor():
                 new_hashes.add(item_hash)
 
         logger.info(f"🆕 New items found: {len(new_hashes)}")
-        if new_hashes:
-            update_hashes(conn, new_hashes)
-        # cleanup: keep last 7 days
-        cleanup_cutoff = now - timedelta(days=7)
-        cleanup_hashes(conn, cleanup_cutoff)
+        update_hashes(conn, new_hashes)
+        cleanup_hashes(conn, cutoff)
 
         job_status["last_success"] = datetime.datetime.now().isoformat()
         job_status["error_count"] = 0
@@ -330,7 +245,7 @@ def run_tnp_monitor():
         logger.error(error_msg)
         try:
             send_telegram_message(f"❌ *Error in TNP Monitor:*\n{e}")
-        except Exception:
+        except:
             logger.error("Failed to send error message to Telegram")
 
     finally:
@@ -387,7 +302,7 @@ def status():
                 "next_run": str(job.next_run_time) if job.next_run_time else None,
                 "trigger": str(job.trigger)
             })
-    except Exception:
+    except:
         scheduler_info = "Scheduler not available"
     
     return jsonify({
@@ -425,7 +340,7 @@ def init_scheduler():
     """Initialize the background scheduler"""
     scheduler = BackgroundScheduler()
     
-    # Schedule the job to run every 10 minutes
+    # Schedule the job to run every 30 minutes
     scheduler.add_job(
         func=run_tnp_monitor,
         trigger=IntervalTrigger(minutes=10),
@@ -443,9 +358,12 @@ def init_scheduler():
         replace_existing=True
     )
     
-    # internal health check
+    # Schedule a health check every 5 minutes to keep the app alive
+    # Note: This internal health check is a backup. You should also set up an external cron job
+    # at cron-job.org to ping your app's /health endpoint every 5 minutes
     def internal_health_check():
         try:
+            # This is just a local health check, external cron job is more reliable
             logger.info("Internal health check - app is running")
         except Exception as e:
             logger.error(f"Health check error: {e}")
@@ -460,7 +378,7 @@ def init_scheduler():
     
     scheduler.start()
     logger.info("✅ Scheduler started successfully")
-    logger.info("📅 TNP Monitor job scheduled to run every 10 minutes")
+    logger.info("📅 TNP Monitor job scheduled to run every 30 minutes")
     logger.info("🚀 Immediate test job scheduled to run now")
     return scheduler
 
@@ -475,5 +393,3 @@ if __name__ == '__main__':
     # Run the app
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
-
-# --- END: minimal fixes applied ---
